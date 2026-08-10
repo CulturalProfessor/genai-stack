@@ -119,13 +119,13 @@ set of conversations.
 
 | URL | Service | What it is |
 |---|---|---|
-| **http://localhost:5173** | `web` | The chat, in React. Saved conversations, streaming answers, Graph RAG or LLM only. |
-| http://localhost:8501 | `ui` | Streamlit: index a repository, and chat with a PDF. Same conversation store as the React client. |
+| **http://localhost:5173** | `web` | The app, in React: ask the codebase, chat with a PDF, index a repository. |
+| http://localhost:8501 | `ui` | The older Streamlit app. Same three jobs, same store — kept while the React client settles. |
 | http://localhost:7474 | `database` | Neo4j browser — inspect the graph directly. neo4j / password. |
-| http://localhost:8504 | `api` | HTTP API over the same chains and the same conversations. |
+| http://localhost:8504 | `api` | HTTP API over the same chains, conversations, PDFs and indexing. |
 
-The React client covers the code chat; indexing and PDFs are still on the
-Streamlit pages, which is why both run.
+Both clients read and write the same Neo4j, so a chat started in one shows up
+in the other.
 
 Two optional extras, off by default:
 
@@ -165,8 +165,10 @@ apps/                   thin entry points over the library
   api.py                the FastAPI service
 
 web/                    the React client (Vite, Tailwind, shadcn primitives)
-  src/lib/api.ts        the typed API client, including the SSE stream
-  src/components/       Sidebar, Transcript, Composer
+  src/lib/api.ts        the typed API client, including the SSE streams
+  src/hooks/useChat.ts  conversations, messages and streaming, shared by both chats
+  src/views/            ChatView, PdfView, IndexView
+  src/components/       NavRail, Sidebar, Transcript, Composer
 front-end/              the older Svelte client for the API
 tests/                  tests over the index pipeline
 index/                  generated code indexes (gitignored)
@@ -215,6 +217,13 @@ run Ollama in a container.
 | `POST /query` | `{"text": "...", "rag": true}` |
 | `POST /generate-ticket` | `{"text": "..."}` |
 | `GET /query-stream?text=…&rag=true` | SSE. Stays a GET because `EventSource` cannot POST. |
+| `GET/POST /conversations` | List, or create with `{"kind": "code"}`. |
+| `GET/PATCH/DELETE /conversations/{id}` | Load with its messages, rename, remove. |
+| `GET /conversations/{id}/ask?text=…&rag=true` | SSE. Saves both turns; a `pdf` conversation is answered from its document. |
+| `GET/DELETE /graph` | Counts and indexed repositories, or clear the code graph. |
+| `GET /graph/index?url=…&branch=…` | SSE. Clone, parse and import, reporting progress. |
+| `GET/POST /pdf/documents` | List, or upload a PDF as multipart `file`. |
+| `DELETE /pdf/documents/{id}` | Remove a PDF, its chunks and its chats. |
 
 ```bash
 curl -X POST http://localhost:8504/query -H 'Content-Type: application/json' \
