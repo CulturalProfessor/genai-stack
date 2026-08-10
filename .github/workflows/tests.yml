@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # The suite covers the code-index pipeline, which needs only tree-sitter.
+      # Installing the full runtime stack (torch, sentence-transformers) would
+      # add minutes to every run without covering more code.
+      - run: pip install -r requirements-dev.txt
+
+      - run: python -m pytest tests/ -v
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
