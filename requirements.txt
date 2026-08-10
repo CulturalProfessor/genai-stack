@@ -35,4 +35,6 @@ streamlit==1.50.0
 fastapi==0.141.1
 uvicorn==0.38.0
 sse-starlette==3.4.8
+# FastAPI needs this to accept a file upload; it is not a fastapi dependency.
+python-multipart==0.0.20
 pypdf==6.1.1

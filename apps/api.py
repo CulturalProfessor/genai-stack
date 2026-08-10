@@ -5,15 +5,19 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Generator
 from dataclasses import asdict
+from io import BytesIO
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from langchain.chains import RetrievalQA
 from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain_neo4j import Neo4jGraph
+from langchain_neo4j import Neo4jGraph, Neo4jVector
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
+from pypdf import PdfReader
 from sse_starlette.sse import EventSourceResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,21 +28,43 @@ from genai_stack.chains import (
     configure_qa_rag_chain,
     generate_ticket,
 )
+from genai_stack.code_index import count_symbols
 from genai_stack.conversations import (
     KIND_CODE,
+    KIND_PDF,
     append_message,
     chat_history,
     create_conversation,
     delete_conversation,
+    delete_conversations_for,
     get_conversation,
     list_conversations,
     load_messages,
     rename_conversation,
     set_title_if_untitled,
 )
+from genai_stack.extract import build_payload
+from genai_stack.ingest import (
+    import_index,
+    list_repositories,
+    record_import,
+    reset_graph,
+)
 from genai_stack.llm import load_embedding_model, load_llm
+from genai_stack.pdf_store import (
+    DOCUMENT_ID_PROPERTY,
+    PDF_CHUNK_LABEL,
+    PDF_INDEX_NAME,
+    chunk_metadata,
+    delete_document,
+    get_document,
+    list_documents,
+    register_document,
+)
+from genai_stack.pdf_store import document_id as pdf_document_id
 from genai_stack.schema import BaseLogger, apply_schema
 from genai_stack.settings import load_settings
+from genai_stack.sources import allowed_hosts, cloned_repository, parse_repo_url
 
 logger = logging.getLogger(__name__)
 settings = load_settings()
@@ -278,13 +304,36 @@ async def remove_conversation(conversation_id: str):
     return {"deleted": conversation_id}
 
 
+def _pdf_answer(document_id: str, text: str, callbacks):
+    """Retrieval limited to one uploaded PDF."""
+    store = Neo4jVector.from_existing_index(
+        embedding=embeddings,
+        url=settings.neo4j_uri,
+        username=settings.neo4j_username,
+        password=settings.neo4j_password,
+        index_name=PDF_INDEX_NAME,
+        node_label=PDF_CHUNK_LABEL,
+    )
+    chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=store.as_retriever(
+            search_kwargs={"filter": {DOCUMENT_ID_PROPERTY: document_id}}
+        ),
+    )
+    return chain.invoke({"query": text}, config={"callbacks": callbacks})["result"]
+
+
 # EventSource only issues GET requests, so the question travels as a query
 # parameter here just as it does on /query-stream.
 @app.get("/conversations/{conversation_id}/ask", dependencies=guarded)
 def ask_in_conversation(conversation_id: str, question: Ask = Depends()):
-    _conversation_or_404(conversation_id)
+    conversation = _conversation_or_404(conversation_id)
     history = chat_history(load_messages(neo4j_graph, conversation_id))
-    mode = "Graph RAG" if question.rag else "LLM only"
+    # A PDF conversation is answered from its document, not the code graph.
+    # The conversation itself says which, so the client does not have to.
+    pdf = conversation.kind == KIND_PDF
+    mode = "PDF" if pdf else ("Graph RAG" if question.rag else "LLM only")
 
     # Saved before the answer, so a question that fails is not lost.
     append_message(neo4j_graph, conversation_id, "user", question.text)
@@ -293,6 +342,8 @@ def ask_in_conversation(conversation_id: str, question: Ask = Depends()):
     q = Queue()
 
     def cb():
+        if pdf:
+            return _pdf_answer(conversation.subject, question.text, [QueueCallback(q)])
         return answer_question(
             _chain_for(question.rag),
             question.text,
@@ -316,6 +367,189 @@ def ask_in_conversation(conversation_id: str, question: Ask = Depends()):
         yield json.dumps({"done": True, "title": conversation.title if conversation else ""})
 
     return EventSourceResponse(generate(), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------
+# The code graph: what is in it, and putting a repository into it
+# --------------------------------------------------------------------------
+
+GRAPH_COUNTS = """
+RETURN COUNT { MATCH (f:File) } AS files,
+       COUNT { MATCH (c:Code) } AS symbols,
+       COUNT { MATCH (:Code)-[:CALLS]->(:Code) } AS calls,
+       COUNT {
+           MATCH (a:Code)-[:CALLS]->(b:Code)
+           WHERE a.file_path <> b.file_path
+       } AS cross_file,
+       COUNT { MATCH (:File)-[:IMPORTS]->(:File) } AS imports
+"""
+
+
+@app.get("/graph", dependencies=guarded)
+async def graph_summary():
+    return {
+        "counts": neo4j_graph.query(GRAPH_COUNTS)[0],
+        "repositories": list_repositories(neo4j_graph),
+        "allowed_hosts": allowed_hosts(),
+    }
+
+
+@app.delete("/graph", dependencies=guarded)
+async def clear_graph():
+    """Drops the code graph. Conversations and PDFs are left alone."""
+    reset_graph(neo4j_graph)
+    return {"counts": neo4j_graph.query(GRAPH_COUNTS)[0]}
+
+
+class IndexRequest(BaseModel):
+    url: str
+    branch: str | None = None
+
+
+@app.get("/graph/index", dependencies=guarded)
+def index_repository(request: IndexRequest = Depends()):
+    """Clone, parse and import a repository, reporting progress as it goes."""
+
+    def generate():
+        try:
+            ref = parse_repo_url(request.url, request.branch or None)
+        except ValueError as exc:
+            yield json.dumps({"error": str(exc)})
+            return
+
+        try:
+            yield json.dumps({"stage": "cloning", "repo": ref.slug})
+            with cloned_repository(ref) as checkout:
+                yield json.dumps({"stage": "parsing", "repo": ref.slug})
+                index = build_payload(
+                    checkout, repo_name=ref.name, source_url=ref.clone_url
+                )
+
+            total = count_symbols(index)
+            if not total:
+                yield json.dumps(
+                    {"error": f"No TypeScript or JavaScript symbols found in {ref.slug}"}
+                )
+                return
+            yield json.dumps(
+                {"stage": "parsed", "symbols": total, "files": len(index["files"])}
+            )
+
+            # import_index reports progress through a callback, but this is a
+            # generator - so collect into a queue and drain it as it fills.
+            progress: Queue = Queue()
+
+            def on_progress(done: int, of: int) -> None:
+                progress.put((done, of))
+
+            done_marker = object()
+            result: dict = {}
+
+            def work():
+                try:
+                    result["imported"] = import_index(
+                        index,
+                        graph=neo4j_graph,
+                        embeddings=embeddings,
+                        batch_size=settings.import_batch_size,
+                        on_progress=on_progress,
+                    )
+                    record_import(neo4j_graph, index, result["imported"])
+                except BaseException as exc:  # noqa: BLE001 - reported below
+                    result["error"] = str(exc)
+                finally:
+                    progress.put(done_marker)
+
+            worker = Thread(target=work)
+            worker.start()
+            while True:
+                try:
+                    item = progress.get(True, timeout=1)
+                except Empty:
+                    continue
+                if item is done_marker:
+                    break
+                imported, of = item
+                yield json.dumps(
+                    {"stage": "importing", "imported": imported, "total": of}
+                )
+            worker.join()
+
+            if "error" in result:
+                yield json.dumps({"error": result["error"]})
+                return
+            yield json.dumps(
+                {
+                    "done": True,
+                    "imported": result.get("imported", 0),
+                    "repo": ref.slug,
+                    "counts": neo4j_graph.query(GRAPH_COUNTS)[0],
+                }
+            )
+        except RuntimeError as exc:  # clone failures carry a readable message
+            yield json.dumps({"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client
+            logger.exception("Indexing failed")
+            yield json.dumps({"error": str(exc)})
+
+    return EventSourceResponse(generate(), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------
+# Uploaded PDFs
+# --------------------------------------------------------------------------
+
+
+@app.get("/pdf/documents", dependencies=guarded)
+async def pdf_documents():
+    return {"documents": [asdict(d) for d in list_documents(neo4j_graph)]}
+
+
+@app.post("/pdf/documents", dependencies=guarded)
+async def upload_pdf(file: UploadFile = File(...)):
+    content = await file.read()
+    name = file.filename or "document.pdf"
+    doc_id = pdf_document_id(name, content)
+
+    existing = get_document(neo4j_graph, doc_id)
+    if existing:
+        return {"document": asdict(existing), "reused": True}
+
+    reader = PdfReader(BytesIO(content))
+    text = "".join(page.extract_text() or "" for page in reader.pages)
+    if not text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="No text could be extracted - is this a scanned PDF?",
+        )
+
+    chunks = RecursiveCharacterTextSplitter(
+        chunk_size=1000, chunk_overlap=200, length_function=len
+    ).split_text(text)
+    Neo4jVector.from_texts(
+        chunks,
+        url=settings.neo4j_uri,
+        username=settings.neo4j_username,
+        password=settings.neo4j_password,
+        embedding=embeddings,
+        metadatas=chunk_metadata(doc_id, name, len(chunks)),
+        index_name=PDF_INDEX_NAME,
+        node_label=PDF_CHUNK_LABEL,
+    )
+    register_document(
+        neo4j_graph, doc_id, name, chunks=len(chunks), pages=len(reader.pages)
+    )
+    return {"document": asdict(get_document(neo4j_graph, doc_id)), "reused": False}
+
+
+@app.delete("/pdf/documents/{document_id}", dependencies=guarded)
+async def remove_pdf(document_id: str):
+    if get_document(neo4j_graph, document_id) is None:
+        raise HTTPException(status_code=404, detail="No such document")
+    delete_document(neo4j_graph, document_id)
+    # Its chats are about a document that no longer exists.
+    delete_conversations_for(neo4j_graph, document_id)
+    return {"deleted": document_id}
 
 
 @app.post("/generate-ticket", dependencies=guarded)
