@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from code_index import batched, build_text, count_symbols, iter_rows, load_index
+from genai_stack.code_index import batched, build_text, count_symbols, iter_rows, load_index
 
 INDEX = {
     "repo": "Rocket.Chat",
@@ -134,7 +134,7 @@ def test_load_index_rejects_unrelated_json(tmp_path):
         load_index(path)
 
 
-from code_index import iter_import_edges, resolve_import
+from genai_stack.code_index import iter_import_edges, resolve_import
 
 KNOWN = {
     "src/crowd.ts",

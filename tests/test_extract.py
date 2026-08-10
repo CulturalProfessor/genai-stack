@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import fs
+from genai_stack import extract as fs
 
 TS_SOURCE = """\
 import { Accounts } from 'meteor/accounts-base';

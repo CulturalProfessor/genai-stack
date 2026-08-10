@@ -409,8 +409,8 @@ def build_index(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path("../Rocket.Chat"), help="Repository to index")
-    # Written into data/, which docker-compose mounts into the loader container.
-    parser.add_argument("--output", type=Path, default=Path("data/all_code_blocks.json"))
+    # Written into index/, which docker-compose mounts into the loader container.
+    parser.add_argument("--output", type=Path, default=Path("index/all_code_blocks.json"))
     # 4000 chars x the retriever's k=4 keeps the RAG prompt inside the LLM context.
     parser.add_argument("--max-chars", type=int, default=4000, help="Truncate symbols longer than this")
     parser.add_argument("--min-chars", type=int, default=0, help="Skip symbols shorter than this")
