@@ -3,6 +3,10 @@ services:
   llm:
     image: ollama/ollama:latest
     profiles: ["linux"]
+    volumes:
+      # Without this the pulled model lives in the container's writable layer
+      # and is downloaded again after every `docker compose down`.
+      - ollama_models:/root/.ollama
     networks:
       - net
 
@@ -12,7 +16,7 @@ services:
       dockerfile: pull_model.Dockerfile
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://host.docker.internal:11434}
-      - LLM=${LLM-llama2}
+      - LLM=${LLM-qwen2.5-coder:1.5b}
     networks:
       - net
 
@@ -36,8 +40,17 @@ services:
       - net
 
   loader:
+    image: genai-stack/app:latest
     build:
-      dockerfile: loader.Dockerfile
+      context: .
+      dockerfile: Dockerfile
+    command: ["streamlit", "run", "apps/loader.py", "--server.port=8502", "--server.address=0.0.0.0"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8502/_stcore/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
     volumes:
       - $PWD/embedding_model:/embedding_model
       # Holds the index from `python3 -m genai_stack.extract`. Mounted as a
@@ -82,8 +95,17 @@ services:
 
 
   bot:
+    image: genai-stack/app:latest
     build:
-      dockerfile: bot.Dockerfile
+      context: .
+      dockerfile: Dockerfile
+    command: ["streamlit", "run", "apps/bot.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
     volumes:
       - $PWD/embedding_model:/embedding_model
     environment:
@@ -92,7 +114,7 @@ services:
       - NEO4J_USERNAME=${NEO4J_USERNAME-neo4j}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://host.docker.internal:11434}
-      - LLM=${LLM-llama2}
+      - LLM=${LLM-qwen2.5-coder:1.5b}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL-sentence_transformer}
       - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT-"https://api.smith.langchain.com"}
       - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2-false}
@@ -121,15 +143,24 @@ services:
       - 8501:8501
 
   pdf_bot:
+    image: genai-stack/app:latest
     build:
-      dockerfile: pdf_bot.Dockerfile
+      context: .
+      dockerfile: Dockerfile
+    command: ["streamlit", "run", "apps/pdf_bot.py", "--server.port=8503", "--server.address=0.0.0.0"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8503/_stcore/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
     environment:
       - NEO4J_URI=${NEO4J_URI-neo4j://database:7687}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD-password}
       - NEO4J_USERNAME=${NEO4J_USERNAME-neo4j}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://host.docker.internal:11434}
-      - LLM=${LLM-llama2}
+      - LLM=${LLM-qwen2.5-coder:1.5b}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL-sentence_transformer}
       - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT-"https://api.smith.langchain.com"}
       - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2-false}
@@ -158,8 +189,17 @@ services:
       - 8503:8503
 
   api:
+    image: genai-stack/app:latest
     build:
-      dockerfile: api.Dockerfile
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "apps.api:app", "--host", "0.0.0.0", "--port", "8504"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8504/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
     volumes:
       - $PWD/embedding_model:/embedding_model
     environment:
@@ -172,7 +212,7 @@ services:
       - NEO4J_USERNAME=${NEO4J_USERNAME-neo4j}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://host.docker.internal:11434}
-      - LLM=${LLM-llama2}
+      - LLM=${LLM-qwen2.5-coder:1.5b}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL-sentence_transformer}
       - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT-"https://api.smith.langchain.com"}
       - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2-false}
@@ -222,6 +262,9 @@ services:
       - net
     ports:
       - 8505:8505
+
+volumes:
+  ollama_models:
 
 networks:
   net:
