@@ -8,13 +8,24 @@ type Props = {
   onSend: (text: string) => void;
   onStop: () => void;
   busy: boolean;
-  mode: "Graph RAG" | "LLM only";
-  onModeChange: (mode: "Graph RAG" | "LLM only") => void;
+  placeholder?: string;
+  hint?: string;
+  /** Omitted by the PDF chat, which has only one way to answer. */
+  mode?: "Graph RAG" | "LLM only";
+  onModeChange?: (mode: "Graph RAG" | "LLM only") => void;
 };
 
 const MODES = ["Graph RAG", "LLM only"] as const;
 
-export function Composer({ onSend, onStop, busy, mode, onModeChange }: Props) {
+export function Composer({
+  onSend,
+  onStop,
+  busy,
+  mode,
+  onModeChange,
+  placeholder = "Ask about the indexed code",
+  hint = "Graph RAG searches the indexed code and follows its call and import edges.",
+}: Props) {
   const [text, setText] = useState("");
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -48,27 +59,31 @@ export function Composer({ onSend, onStop, busy, mode, onModeChange }: Props) {
                 send();
               }
             }}
-            placeholder="Ask about the indexed code"
+            placeholder={placeholder}
             className="max-h-[200px] w-full resize-none bg-transparent px-4 pt-3.5 text-[0.95rem] outline-none placeholder:text-muted-foreground"
           />
 
           <div className="flex items-center justify-between gap-2 px-3 pb-2.5 pt-1">
-            <div className="flex rounded-lg bg-white/[0.04] p-0.5">
-              {MODES.map((option) => (
-                <button
-                  key={option}
-                  onClick={() => onModeChange(option)}
-                  className={cn(
-                    "rounded-md px-2.5 py-1 text-xs transition-colors",
-                    mode === option
-                      ? "bg-primary/20 text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
+            {mode && onModeChange ? (
+              <div className="flex rounded-lg bg-white/[0.04] p-0.5">
+                {MODES.map((option) => (
+                  <button
+                    key={option}
+                    onClick={() => onModeChange(option)}
+                    className={cn(
+                      "rounded-md px-2.5 py-1 text-xs transition-colors",
+                      mode === option
+                        ? "bg-primary/20 text-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span />
+            )}
 
             {busy ? (
               <Button size="icon" variant="secondary" onClick={onStop} aria-label="Stop">
@@ -88,7 +103,7 @@ export function Composer({ onSend, onStop, busy, mode, onModeChange }: Props) {
         </div>
 
         <p className="mt-2 text-center text-[0.7rem] text-muted-foreground/70">
-          Graph RAG searches the indexed code and follows its call and import edges.
+          {hint}
         </p>
       </div>
     </div>

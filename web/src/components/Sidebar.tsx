@@ -13,23 +13,28 @@ import { cn } from "@/lib/utils";
 import { groupByAge, type Conversation } from "@/lib/api";
 
 type Props = {
+  title: string;
   conversations: Conversation[];
   activeId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
-  status: { neo4j: string; model: string } | null;
+  /** Rendered above the chat list - the PDF view puts its documents here. */
+  children?: React.ReactNode;
+  footer?: React.ReactNode;
 };
 
 export function Sidebar({
+  title,
   conversations,
   activeId,
   onSelect,
   onNew,
   onRename,
   onDelete,
-  status,
+  children,
+  footer,
 }: Props) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -47,14 +52,13 @@ export function Sidebar({
   return (
     <aside className="flex h-full w-[17rem] shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
       <div className="p-3">
-        <div className="mb-3 flex items-center gap-2 px-1">
-          <span className="text-lg">🕸️</span>
-          <span className="text-sm font-semibold tracking-tight">Code graph</span>
-        </div>
+        <p className="mb-3 px-1 text-sm font-semibold tracking-tight">{title}</p>
         <Button onClick={onNew} className="w-full gap-2">
           <Plus /> New chat
         </Button>
       </div>
+
+      {children}
 
       <nav className="flex-1 overflow-y-auto px-2 pb-2">
         {conversations.length === 0 && (
@@ -133,12 +137,7 @@ export function Sidebar({
       </nav>
 
       <div className="space-y-1 border-t border-sidebar-border px-4 py-3 text-[0.7rem] text-muted-foreground">
-        {status && (
-          <>
-            <p>{status.neo4j}</p>
-            <p>{status.model}</p>
-          </>
-        )}
+        {footer}
         <a
           href="http://localhost:7474"
           target="_blank"

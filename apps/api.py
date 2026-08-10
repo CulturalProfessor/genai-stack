@@ -391,6 +391,9 @@ async def graph_summary():
         "counts": neo4j_graph.query(GRAPH_COUNTS)[0],
         "repositories": list_repositories(neo4j_graph),
         "allowed_hosts": allowed_hosts(),
+        # Here rather than in its own endpoint: this is the one call the client
+        # makes to find out whether the stack is answering, and what with.
+        "model": llm_name,
     }
 
 

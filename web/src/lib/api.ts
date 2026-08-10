@@ -35,19 +35,27 @@ async function json<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function listConversations(kind = "code"): Promise<Conversation[]> {
-  const response = await fetch(`${BASE}/conversations?kind=${kind}`, {
+export async function listConversations(
+  kind = "code",
+  subject?: string,
+): Promise<Conversation[]> {
+  const params = new URLSearchParams({ kind });
+  if (subject) params.set("subject", subject);
+  const response = await fetch(`${BASE}/conversations?${params}`, {
     headers: headers(),
   });
   const body = await json<{ conversations: Conversation[] }>(response);
   return body.conversations;
 }
 
-export async function createConversation(kind = "code"): Promise<Conversation> {
+export async function createConversation(
+  kind = "code",
+  subject?: string,
+): Promise<Conversation> {
   const response = await fetch(`${BASE}/conversations`, {
     method: "POST",
     headers: headers({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ kind }),
+    body: JSON.stringify({ kind, subject: subject ?? null }),
   });
   return json<Conversation>(response);
 }
@@ -120,6 +128,126 @@ export function ask(
   };
 
   return () => source.close();
+}
+
+// ---------------------------------------------------------------------------
+// The code graph
+// ---------------------------------------------------------------------------
+
+export type GraphCounts = {
+  files: number;
+  symbols: number;
+  calls: number;
+  cross_file: number;
+  imports: number;
+};
+
+export type Repository = {
+  name: string;
+  source_url: string | null;
+  files: number;
+  symbols: number;
+  indexed_at: string;
+};
+
+export type GraphSummary = {
+  counts: GraphCounts;
+  repositories: Repository[];
+  allowed_hosts: string[];
+  model: string;
+};
+
+export async function getGraph(): Promise<GraphSummary> {
+  const response = await fetch(`${BASE}/graph`, { headers: headers() });
+  return json<GraphSummary>(response);
+}
+
+export async function clearGraph(): Promise<void> {
+  const response = await fetch(`${BASE}/graph`, {
+    method: "DELETE",
+    headers: headers(),
+  });
+  await json(response);
+}
+
+export type IndexProgress =
+  | { stage: "cloning" | "parsing"; repo: string }
+  | { stage: "parsed"; symbols: number; files: number }
+  | { stage: "importing"; imported: number; total: number };
+
+export type IndexHandlers = {
+  onProgress: (progress: IndexProgress) => void;
+  onDone: (imported: number, repo: string) => void;
+  onError: (message: string) => void;
+};
+
+/** Index a repository, reporting each stage as the server reaches it. */
+export function indexRepository(
+  url: string,
+  branch: string,
+  handlers: IndexHandlers,
+): () => void {
+  const params = new URLSearchParams({ url });
+  if (branch) params.set("branch", branch);
+  if (API_KEY) params.set("api_key", API_KEY);
+  const source = new EventSource(`${BASE}/graph/index?${params}`);
+
+  source.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.error) {
+      handlers.onError(payload.error);
+      source.close();
+    } else if (payload.done) {
+      handlers.onDone(payload.imported, payload.repo);
+      source.close();
+    } else {
+      handlers.onProgress(payload as IndexProgress);
+    }
+  };
+  source.onerror = () => {
+    handlers.onError("The connection to the API was lost.");
+    source.close();
+  };
+
+  return () => source.close();
+}
+
+// ---------------------------------------------------------------------------
+// Uploaded PDFs
+// ---------------------------------------------------------------------------
+
+export type PdfDocument = {
+  id: string;
+  name: string;
+  chunks: number;
+  pages: number;
+  uploaded_at: string;
+};
+
+export async function listDocuments(): Promise<PdfDocument[]> {
+  const response = await fetch(`${BASE}/pdf/documents`, { headers: headers() });
+  const body = await json<{ documents: PdfDocument[] }>(response);
+  return body.documents;
+}
+
+export async function uploadDocument(file: File): Promise<PdfDocument> {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await fetch(`${BASE}/pdf/documents`, {
+    method: "POST",
+    headers: headers(),
+    body: form,
+  });
+  const body = await json<{ document: PdfDocument }>(response);
+  return body.document;
+}
+
+export async function deleteDocument(id: string): Promise<void> {
+  const response = await fetch(`${BASE}/pdf/documents/${id}`, {
+    method: "DELETE",
+    headers: headers(),
+  });
+  await json(response);
 }
 
 /** Conversations bucketed the way the sidebar shows them. */
