@@ -21,6 +21,7 @@ DEFAULT_ALLOWED_HOSTS = ("github.com", "gitlab.com", "bitbucket.org")
 # owner/repo, each segment restricted to what these hosts actually allow.
 _SEGMENT = r"[A-Za-z0-9._-]+"
 _SHORTHAND_RE = re.compile(rf"^(?P<owner>{_SEGMENT})/(?P<name>{_SEGMENT})$")
+_SCP_SYNTAX_RE = re.compile(r"^[\w.+-]+@[\w.-]+:")
 
 CLONE_TIMEOUT_SECONDS = 600
 
@@ -63,6 +64,12 @@ def parse_repo_url(value: str, branch: str | None = None) -> RepoRef:
     # A leading dash would be read by git as an option, not a URL.
     if value.startswith("-"):
         raise ValueError("Repository URL may not start with '-'")
+
+    # scp-style `git@host:owner/repo`, which urlparse would read as a username.
+    if _SCP_SYNTAX_RE.match(value):
+        raise ValueError(
+            "SSH URLs are not supported - use the https:// URL for the repository"
+        )
 
     hosts = allowed_hosts()
 

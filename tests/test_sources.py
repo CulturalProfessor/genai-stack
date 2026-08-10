@@ -57,10 +57,14 @@ def test_rejects_incomplete_input(value):
         parse_repo_url(value)
 
 
+def test_ssh_url_says_so_instead_of_blaming_credentials():
+    with pytest.raises(ValueError, match="SSH URLs are not supported"):
+        parse_repo_url("git@github.com:owner/repo.git")
+
+
 @pytest.mark.parametrize(
     "value",
     [
-        "git@github.com:owner/repo.git",
         "ssh://git@github.com/owner/repo",
         "file:///etc/passwd",
         "http://github.com/owner/repo",
