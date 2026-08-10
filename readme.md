@@ -77,9 +77,11 @@ Answering questions needs an LLM. On Linux, run one in a container:
 docker compose --profile linux up
 ```
 
-...with `OLLAMA_BASE_URL=http://llm:11434` in `.env`. Or set `LLM=gpt-3.5` plus
-an `OPENAI_API_KEY` and nothing is downloaded. Without either, indexing still
-works and questions report a clear error.
+...with `OLLAMA_BASE_URL=http://llm:11434` in `.env`. Add `COMPOSE_PROFILES=linux`
+there too and a plain `docker compose up` starts it; leave it out and the
+hostname `llm` does not resolve on any run where you forget the flag. Or set
+`LLM=gpt-3.5` plus an `OPENAI_API_KEY` and nothing is downloaded. Without
+either, indexing still works and questions report a clear error.
 
 **3.** Open **http://localhost:8501**, paste a repository URL on *Index a
 repository*, and press the button. Then ask questions on *Ask the codebase*.

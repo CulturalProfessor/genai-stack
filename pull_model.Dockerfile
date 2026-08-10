@@ -21,12 +21,30 @@ COPY <<EOF pull_model.clj
   (println "  ----------------------------------------------------------------")
   (println))
 
+;; Compose starts this service alongside the llm container, so on a first run
+;; the server is usually not listening yet and the pull would fail immediately.
+;; Capped at 30s so a stack with no Ollama at all still starts promptly.
+(defn wait-for-server [url]
+  (loop [tries 15]
+    (let [{:keys [exit]} (process/shell {:extra-env {"OLLAMA_HOST" url "HOME" "/root"}
+                                         :continue true
+                                         :out :string
+                                         :err :string}
+                                        "./bin/ollama list")]
+      (cond
+        (zero? exit) true
+        (pos? tries) (do (when (= 15 tries) (println (format "waiting for ollama at %s" url)))
+                         (Thread/sleep 2000)
+                         (recur (dec tries)))
+        :else false))))
+
 (try
   (let [llm (get (System/getenv) "LLM")
         url (get (System/getenv) "OLLAMA_BASE_URL")]
     (if (and llm url (not (#{"gpt-4" "gpt-3.5" "claude" "claudev2"} llm)))
       (do
         (println (format "pulling ollama model %s using %s" llm url))
+        (wait-for-server url)
         (let [done (async/chan)]
           (async/go-loop [n 0]
             (let [[v _] (async/alts! [done (async/timeout 5000)])]
