@@ -1,0 +1,33 @@
+# Design tokens for the app. Anything expressible as a theme option lives here
+# rather than in the CSS in apps/theme.py, so there is one place to change a
+# colour and the widgets Streamlit renders for us stay consistent with it.
+[server]
+# The app is served behind docker's port mapping; the toolbar's deploy button
+# and usage stats are noise for something running on localhost.
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#7C9CFF"
+backgroundColor = "#0F1116"
+secondaryBackgroundColor = "#171A21"
+textColor = "#E7E9EE"
+linkColor = "#9DB4FF"
+borderColor = "#242832"
+codeBackgroundColor = "#141821"
+baseRadius = "0.7rem"
+buttonRadius = "0.6rem"
+showWidgetBorder = true
+showSidebarBorder = true
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+
+[theme.sidebar]
+backgroundColor = "#0A0C11"
+secondaryBackgroundColor = "#151920"
+borderColor = "#1E222B"
+baseRadius = "0.6rem"
+buttonRadius = "0.55rem"
+showWidgetBorder = false
