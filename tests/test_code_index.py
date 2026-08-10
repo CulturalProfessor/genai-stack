@@ -224,3 +224,21 @@ def test_rows_carry_call_targets():
 def test_rows_tolerate_an_index_without_calls():
     """Indexes generated before CALLS extraction must still import."""
     assert next(iter_rows(INDEX))["calls"] == []
+
+
+def test_resolve_import_maps_js_specifier_to_ts_file():
+    """TypeScript ESM imports name the emitted .js, not the .ts on disk."""
+    known = {"source/utils/delay.ts", "source/core/Ky.ts"}
+    assert resolve_import("source/core/Ky.ts", "../utils/delay.js", known) == "source/utils/delay.ts"
+
+
+def test_resolve_import_maps_jsx_and_mjs_specifiers():
+    known = {"src/View.tsx", "src/mod.mts", "src/a.ts"}
+    assert resolve_import("src/a.ts", "./View.jsx", known) == "src/View.tsx"
+    assert resolve_import("src/a.ts", "./mod.mjs", known) == "src/mod.mts"
+
+
+def test_resolve_import_prefers_a_real_js_file_over_the_ts_mapping():
+    """If the .js actually exists, it wins - the mapping is only a fallback."""
+    known = {"src/util.js", "src/util.ts", "src/a.ts"}
+    assert resolve_import("src/a.ts", "./util.js", known) == "src/util.js"

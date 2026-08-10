@@ -12,6 +12,16 @@ from typing import Iterable, Iterator
 # Extensions tried when a relative import omits one, in resolution order.
 IMPORT_SUFFIXES = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
 
+# TypeScript's ESM resolution requires import specifiers to name the *emitted*
+# file, so `./delay.js` is how you import `delay.ts`. Without this mapping every
+# import in a modern TS codebase fails to resolve.
+JS_TO_TS_EXTENSIONS = {
+    ".js": [".ts", ".tsx", ".d.ts"],
+    ".jsx": [".tsx"],
+    ".mjs": [".mts"],
+    ".cjs": [".cts"],
+}
+
 
 def load_index(path: Path) -> dict:
     index = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -83,6 +93,14 @@ def resolve_import(from_path: str, specifier: str, known_paths: set[str]) -> str
     resolved = "/".join(parts)
 
     candidates = [resolved + suffix for suffix in IMPORT_SUFFIXES]
+
+    # `./delay.js` -> `delay.ts`, the TypeScript ESM convention.
+    for js_ext, ts_exts in JS_TO_TS_EXTENSIONS.items():
+        if resolved.endswith(js_ext):
+            stem = resolved[: -len(js_ext)]
+            candidates += [stem + ts_ext for ts_ext in ts_exts]
+            break
+
     candidates += [f"{resolved}/index{suffix}" for suffix in IMPORT_SUFFIXES if suffix]
     for candidate in candidates:
         if candidate in known_paths:
