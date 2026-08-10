@@ -100,4 +100,30 @@
   .prose-answer td {
     @apply border-b border-border px-2 py-1;
   }
+
+  /* The typing caret, drawn at the end of the last line of text rather than as
+     an element after it - a block-level sibling starts its own line, which is
+     what stranded the caret below the answer.
+
+     Two rules, not one with an override: a list's own ::after renders below
+     the list, and `:not(ul)` cannot be outweighed by a plain `ol` selector,
+     since :last-child already counts for more than a type name. So each case
+     selects only what it should draw on. */
+  .prose-answer.is-streaming > :last-child:not(ul):not(ol)::after,
+  .prose-answer.is-streaming > :is(ul, ol):last-child > li:last-child::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1.05em;
+    margin-left: 3px;
+    vertical-align: text-bottom;
+    background-color: currentColor;
+    animation: caret-blink 1s step-end infinite;
+  }
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
 }

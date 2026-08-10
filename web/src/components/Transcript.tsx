@@ -42,14 +42,7 @@ export function Transcript({ messages, streaming, error }: Props) {
 
       {streaming !== null && (
         <div className="mb-8">
-          {streaming === "" ? (
-            <Thinking />
-          ) : (
-            <>
-              <Answer content={streaming} />
-              <span className="ml-0.5 inline-block h-4 w-[2px] animate-blink bg-foreground align-middle" />
-            </>
-          )}
+          {streaming === "" ? <Thinking /> : <Answer content={streaming} streaming />}
         </div>
       )}
 
@@ -64,9 +57,12 @@ export function Transcript({ messages, streaming, error }: Props) {
   );
 }
 
-function Answer({ content }: { content: string }) {
+function Answer({ content, streaming }: { content: string; streaming?: boolean }) {
+  // The caret is drawn by CSS on the last block of the answer rather than as an
+  // element after it: a sibling of a block-level <p> starts its own line, which
+  // is what left it stranded below the text while the answer was still coming.
   return (
-    <div className={cn("prose-answer")}>
+    <div className={cn("prose-answer", streaming && "is-streaming")}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
     </div>
   );

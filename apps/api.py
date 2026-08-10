@@ -147,7 +147,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    # Every method the API serves. Renaming a conversation is a PATCH and
+    # deleting one is a DELETE; leaving those out makes the browser refuse
+    # them at the preflight, while curl - which does not preflight - works.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
