@@ -8,7 +8,12 @@ from streamlit.logger import get_logger
 
 from genai_stack.code_index import count_symbols, load_index
 from genai_stack.extract import build_payload
-from genai_stack.ingest import import_index, reset_graph
+from genai_stack.ingest import (
+    import_index,
+    list_repositories,
+    record_import,
+    reset_graph,
+)
 from genai_stack.sources import allowed_hosts, cloned_repository, parse_repo_url
 from resources import get_embeddings, get_graph, get_settings
 
@@ -37,27 +42,36 @@ def import_to_graph(index: dict) -> int:
         batch_size=get_settings().import_batch_size,
         on_progress=on_progress,
     )
+    record_import(get_graph(), index, imported)
     progress.empty()
     status.empty()
     return imported
 
 
-def graph_summary() -> None:
-    """What landed in the graph. Cross-file call edges are the number to watch."""
+def graph_counts() -> dict | None:
+    """Counted with COUNT subqueries so an empty graph still returns a row."""
     try:
-        counts = get_graph().query(
+        return get_graph().query(
             """
-            MATCH (f:File) WITH count(f) AS files
-            MATCH (c:Code) WITH files, count(c) AS symbols
-            OPTIONAL MATCH (a:Code)-[r:CALLS]->(b:Code)
-            WITH files, symbols, count(r) AS calls,
-                 count(CASE WHEN a.file_path <> b.file_path THEN 1 END) AS cross_file
-            OPTIONAL MATCH (:File)-[i:IMPORTS]->(:File)
-            RETURN files, symbols, calls, cross_file, count(i) AS imports
+            RETURN COUNT { MATCH (f:File) } AS files,
+                   COUNT { MATCH (c:Code) } AS symbols,
+                   COUNT { MATCH (:Code)-[:CALLS]->(:Code) } AS calls,
+                   COUNT {
+                       MATCH (a:Code)-[:CALLS]->(b:Code)
+                       WHERE a.file_path <> b.file_path
+                   } AS cross_file,
+                   COUNT { MATCH (:File)-[:IMPORTS]->(:File) } AS imports
             """
         )[0]
     except Exception:  # noqa: BLE001 - a summary is a nicety, not the result
         logger.exception("Could not read graph summary")
+        return None
+
+
+def graph_summary() -> None:
+    """What is in the graph. Cross-file call edges are the number to watch."""
+    counts = graph_counts()
+    if counts is None:
         return
 
     a, b, c, d = st.columns(4)
@@ -70,6 +84,51 @@ def graph_summary() -> None:
     st.caption(
         "Cross-file call edges are what retrieval traverses to reach code a "
         "question does not name directly."
+    )
+
+
+def indexed_state() -> None:
+    """What is already in the graph, shown before you index anything."""
+    counts = graph_counts()
+    if counts is None:
+        st.error("Neo4j is not reachable.", icon="🚨")
+        return
+
+    if not counts["symbols"]:
+        st.info(
+            "Nothing is indexed yet. Index a repository below, then ask "
+            "questions about it on *Ask the codebase*.",
+            icon="📭",
+        )
+        return
+
+    graph_summary()
+
+    try:
+        repositories = list_repositories(get_graph())
+    except Exception:  # noqa: BLE001 - the counts above are the real answer
+        logger.exception("Could not list repositories")
+        return
+
+    if not repositories:
+        return
+    st.dataframe(
+        [
+            {
+                "Repository": repo["name"],
+                "Files": repo["files"],
+                "Symbols": repo["symbols"],
+                "Indexed": (repo["indexed_at"] or "")[:19].replace("T", " "),
+                "Source": repo["source_url"] or "",
+            }
+            for repo in repositories
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption(
+        "Importing a second repository adds to the same graph rather than "
+        "replacing it. Clear it below to start over."
     )
 
 
@@ -171,6 +230,10 @@ def render() -> None:
     st.header("Index a repository")
     st.caption("Explore the result at http://localhost:7474")
 
+    indexed_state()
+
+    st.divider()
+    st.subheader("Add code to the graph")
     url_tab, file_tab = st.tabs(["From a repository URL", "From an index file"])
     with url_tab:
         from_url()
@@ -178,11 +241,15 @@ def render() -> None:
         from_file()
 
     with st.expander("Danger zone"):
-        st.caption("Removes every File and Code node so you can re-import cleanly.")
+        st.caption(
+            "Removes every File, Code and Repository node so you can re-import "
+            "cleanly. Conversations and uploaded PDFs are not touched."
+        )
         if st.button("Delete imported graph"):
             try:
                 reset_graph(get_graph())
                 st.success("Graph cleared", icon="✅")
+                st.rerun()
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 logger.exception("Reset failed")
                 st.error(f"Error: {exc}", icon="🚨")

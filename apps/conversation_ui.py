@@ -66,11 +66,11 @@ def _rename_form(graph, conversation, key: str, renaming_key: str) -> None:
             "Title", value=conversation.title, label_visibility="collapsed"
         )
         save, cancel = st.columns(2)
-        if save.form_submit_button("Save", use_container_width=True):
+        if save.form_submit_button("Save", width="stretch"):
             rename_conversation(graph, conversation.id, title)
             st.session_state[renaming_key] = None
             st.rerun()
-        if cancel.form_submit_button("Cancel", use_container_width=True):
+        if cancel.form_submit_button("Cancel", width="stretch"):
             st.session_state[renaming_key] = None
             st.rerun()
 
@@ -86,7 +86,7 @@ def conversation_sidebar(
         st.markdown(f"#### {header}")
 
         if st.button(
-            "New chat", key=f"new-{kind}-{subject}", use_container_width=True,
+            "New chat", key=f"new-{kind}-{subject}", width="stretch",
             type="primary",
         ):
             start_new(graph, kind, subject)
@@ -111,17 +111,17 @@ def conversation_sidebar(
             open_col.button(
                 label,
                 key=f"open-{key}",
-                use_container_width=True,
+                width="stretch",
                 # The open chat is the filled one, so the list shows where you are.
                 type="secondary" if key != active else "primary",
                 on_click=lambda cid=key: st.session_state.update({selection_key: cid}),
             )
-            with menu_col.popover("⋯", use_container_width=True):
+            with menu_col.popover("⋯", width="stretch"):
                 st.caption(f"{conversation.message_count} messages")
-                if st.button("Rename", key=f"rename-{key}", use_container_width=True):
+                if st.button("Rename", key=f"rename-{key}", width="stretch"):
                     st.session_state[renaming_key] = key
                     st.rerun()
-                if st.button("Delete", key=f"delete-{key}", use_container_width=True):
+                if st.button("Delete", key=f"delete-{key}", width="stretch"):
                     delete_conversation(graph, key)
                     if st.session_state.get(selection_key) == key:
                         st.session_state[selection_key] = None

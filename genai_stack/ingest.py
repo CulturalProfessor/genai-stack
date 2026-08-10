@@ -1,6 +1,7 @@
 """Writing the code index into Neo4j: nodes first, then relationships."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Callable
 
 from langchain_neo4j import Neo4jGraph
@@ -15,6 +16,7 @@ from genai_stack.schema import (
     CODE_EMBEDDING_PROPERTY,
     CODE_LABEL,
     FILE_LABEL,
+    REPOSITORY_LABEL,
 )
 
 IMPORT_QUERY = f"""
@@ -133,13 +135,45 @@ def build_relationships(
         graph.query(IMPORTS_QUERY, {"rows": rows})
 
 
+def record_import(graph: Neo4jGraph, index: dict, symbols: int) -> None:
+    """Remember what was imported, so the UI can show it without an import."""
+    graph.query(
+        f"""
+        MERGE (r:{REPOSITORY_LABEL} {{name: $name}})
+        SET r.source_url = $source_url,
+            r.files = $files,
+            r.symbols = $symbols,
+            r.indexed_at = $indexed_at
+        """,
+        {
+            "name": index.get("repo") or "unknown",
+            "source_url": index.get("source_url"),
+            "files": len(index.get("files", [])),
+            "symbols": symbols,
+            "indexed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def list_repositories(graph: Neo4jGraph) -> list[dict]:
+    return graph.query(
+        f"""
+        MATCH (r:{REPOSITORY_LABEL})
+        RETURN r.name AS name, r.source_url AS source_url, r.files AS files,
+               r.symbols AS symbols, r.indexed_at AS indexed_at
+        ORDER BY r.indexed_at DESC
+        """
+    )
+
+
 def reset_graph(graph: Neo4jGraph) -> None:
-    """Delete every File and Code node, in batches so large graphs don't OOM."""
+    """Delete every File, Code and Repository node, in batches so large graphs
+    don't OOM. Conversations and PDFs are deliberately left alone."""
     while True:
         result = graph.query(
             f"""
             MATCH (n)
-            WHERE n:{FILE_LABEL} OR n:{CODE_LABEL}
+            WHERE n:{FILE_LABEL} OR n:{CODE_LABEL} OR n:{REPOSITORY_LABEL}
             WITH n LIMIT 10000
             DETACH DELETE n
             RETURN count(*) AS deleted

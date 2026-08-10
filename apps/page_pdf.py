@@ -110,16 +110,16 @@ def document_sidebar(graph, documents, selected: str | None) -> None:
             open_col.button(
                 document.name,
                 key=f"pdf-{document.id}",
-                use_container_width=True,
+                width="stretch",
                 type="primary" if document.id == selected else "secondary",
                 on_click=lambda did=document.id: st.session_state.update(
                     {SELECTED_DOCUMENT: did}
                 ),
             )
-            with menu_col.popover("⋯", use_container_width=True):
+            with menu_col.popover("⋯", width="stretch"):
                 st.caption(f"{document.pages} pages, {document.chunks} chunks")
                 if st.button(
-                    "Delete", key=f"pdf-delete-{document.id}", use_container_width=True
+                    "Delete", key=f"pdf-delete-{document.id}", width="stretch"
                 ):
                     delete_document(graph, document.id)
                     # Its chats are about a document that no longer exists.

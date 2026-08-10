@@ -1,5 +1,6 @@
 """Neo4j schema for the code graph: labels, constraints and indexes.
 
+    (:Repository {name, source_url, files, symbols, indexed_at})
     (:File {path, name, language, depth})
     (:Code {id, name, qualified_name, kind, parent, start_line, end_line,
             signature, file_path, file_name, text, embedding})
@@ -7,6 +8,10 @@
     (:File)-[:CONTAINS]->(:Code)     a file defines a symbol
     (:Code)-[:CALLS]->(:Code)        a symbol invokes another
     (:File)-[:IMPORTS]->(:File)      a file depends on another
+
+Repository is a record of what was imported, not part of retrieval: the
+importer resolves edges by name across the whole graph, so a File is not
+owned by one repository.
 """
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 FILE_LABEL = "File"
 CODE_LABEL = "Code"
+REPOSITORY_LABEL = "Repository"
 CODE_TEXT_PROPERTY = "text"
 CODE_EMBEDDING_PROPERTY = "embedding"
 VECTOR_INDEX_NAME = "code_embeddings"
@@ -36,6 +42,10 @@ def create_constraints(driver) -> None:
     driver.query(
         f"CREATE CONSTRAINT code_id IF NOT EXISTS "
         f"FOR (c:{CODE_LABEL}) REQUIRE c.id IS UNIQUE"
+    )
+    driver.query(
+        f"CREATE CONSTRAINT repository_name IF NOT EXISTS "
+        f"FOR (r:{REPOSITORY_LABEL}) REQUIRE r.name IS UNIQUE"
     )
 
 
