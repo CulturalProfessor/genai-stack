@@ -16,6 +16,7 @@ st.set_page_config(page_title="Code graph", page_icon="🕸️", layout="wide")
 import page_chat
 import page_index
 import page_pdf
+from chrome import sidebar_status
 
 # Every page module names its entrypoint `render`, so Streamlit would infer the
 # same URL path for all three. Spell the paths out instead.
@@ -25,8 +26,8 @@ pages = [
     st.Page(page_pdf.render, title="Chat with a PDF", icon=":material/description:", url_path="pdf"),
 ]
 
-with st.sidebar:
-    st.markdown("### Code graph")
-    st.caption("Neo4j browser: [localhost:7474](http://localhost:7474)")
-
 st.navigation(pages).run()
+
+# After the page, so its own sidebar sections come first and the status sits
+# at the bottom of the sidebar rather than above them.
+sidebar_status()

@@ -90,11 +90,36 @@ The importer is idempotent — re-indexing updates nodes in place.
 
 ---
 
+## Conversations
+
+Chats are saved in Neo4j, not in the browser session, so they survive a refresh
+and a `docker compose down`. Both chat pages work the same way: **New chat** in
+the sidebar starts one, the list switches between them, and each can be renamed
+or deleted. A chat is titled after its first question.
+
+```
+(:Conversation {id, kind, title, subject})-[:HAS_MESSAGE]->(:Message {role, content, position})
+```
+
+`kind` separates the code chat from the PDF chat; `subject` scopes a PDF chat to
+one document. Messages carry an explicit `position` rather than being ordered by
+timestamp — both halves of a turn are written milliseconds apart.
+
+These labels sit outside the code graph on purpose: clearing the index from
+*Danger zone* deletes `File`, `Code` and `Repository` nodes and leaves your
+conversations and uploaded PDFs alone.
+
+Uploaded PDFs accumulate rather than replacing each other. Each is chunked under
+its own `document_id`, retrieval filters on it, and every document keeps its own
+set of conversations.
+
+---
+
 ## What runs where
 
 | URL | Service | What it is |
 |---|---|---|
-| **http://localhost:8501** | `ui` | The app. Three pages: index a repository, ask the codebase, chat with a PDF. |
+| **http://localhost:8501** | `ui` | The app. Three pages: index a repository, ask the codebase, chat with a PDF. The sidebar holds your saved chats and a status line for Neo4j and the model. |
 | http://localhost:7474 | `database` | Neo4j browser — inspect the graph directly. neo4j / password. |
 | http://localhost:8504 | `api` | HTTP API over the same chains, for scripting or your own front-end. |
 
@@ -120,11 +145,15 @@ genai_stack/            the library — no UI, no app code
   retrieval.py          the graph traversal query + vector store
   llm.py                loading chat and embedding models
   chains.py             the LLM-only and GraphRAG chains
+  conversations.py      saved chats and their messages
+  pdf_store.py          uploaded PDFs and their chunks
   sources.py            validating and cloning repository URLs
 
 apps/                   thin entry points over the library
   ui.py                 the Streamlit app (page router)
   resources.py          cached model/database handles, shared by all pages
+  chrome.py             the sidebar status shared by every page
+  conversation_ui.py    the conversation list, shared by both chat pages
   page_index.py         "Index a repository"
   page_chat.py          "Ask the codebase"
   page_pdf.py           "Chat with a PDF"
