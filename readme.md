@@ -119,22 +119,27 @@ set of conversations.
 
 | URL | Service | What it is |
 |---|---|---|
-| **http://localhost:8501** | `ui` | The app. Three pages: index a repository, ask the codebase, chat with a PDF. The sidebar holds your saved chats and a status line for Neo4j and the model. |
+| **http://localhost:5173** | `web` | The chat, in React. Saved conversations, streaming answers, Graph RAG or LLM only. |
+| http://localhost:8501 | `ui` | Streamlit: index a repository, and chat with a PDF. Same conversation store as the React client. |
 | http://localhost:7474 | `database` | Neo4j browser — inspect the graph directly. neo4j / password. |
-| http://localhost:8504 | `api` | HTTP API over the same chains, for scripting or your own front-end. |
+| http://localhost:8504 | `api` | HTTP API over the same chains and the same conversations. |
+
+The React client covers the code chat; indexing and PDFs are still on the
+Streamlit pages, which is why both run.
 
 Two optional extras, off by default:
 
 ```bash
 docker compose --profile linux up      # + Ollama at :11434
-docker compose --profile frontend up   # + a Svelte client at :8505
+docker compose --profile frontend up   # + the older Svelte client at :8505
 ```
 
 ## Where is what
 
 ```
 Dockerfile              one image, shared by every Python service
-docker-compose.yml      four services by default: ui, api, database, pull-model
+web.Dockerfile          node image for the React dev server
+docker-compose.yml      five services by default: web, ui, api, database, pull-model
 
 genai_stack/            the library — no UI, no app code
   settings.py           environment configuration, read once
@@ -159,7 +164,10 @@ apps/                   thin entry points over the library
   page_pdf.py           "Chat with a PDF"
   api.py                the FastAPI service
 
-front-end/              optional Svelte client for the API
+web/                    the React client (Vite, Tailwind, shadcn primitives)
+  src/lib/api.ts        the typed API client, including the SSE stream
+  src/components/       Sidebar, Transcript, Composer
+front-end/              the older Svelte client for the API
 tests/                  tests over the index pipeline
 index/                  generated code indexes (gitignored)
 data/                   Neo4j's database volume (gitignored)
