@@ -12,8 +12,9 @@ in code the question never matched directly.
 
 ```mermaid
 flowchart LR
+    url(["repo URL"]) --> loader
     repo[("TS/JS repo")] -->|tree-sitter| extract["genai_stack.extract<br/>symbols + calls + imports"]
-    extract -->|index/all_code_blocks.json| loader["loader app<br/>embed + write"]
+    extract -->|index/all_code_blocks.json| loader["loader app<br/>clone + embed + write"]
     loader --> neo4j[("Neo4j<br/>code graph")]
     q(["question"]) --> chain["GraphRAG chain"]
     chain <-->|hybrid search<br/>+ graph traversal| neo4j
@@ -105,6 +106,7 @@ Available variables:
 | RATE_LIMIT_REQUESTS    | 30                                 | OPTIONAL - Requests per IP per window (0 disables)                      |
 | RATE_LIMIT_WINDOW_SECONDS | 60                              | OPTIONAL - Rate limit window                                            |
 | BEDROCK_MODEL_ID       | anthropic.claude-sonnet-5          | OPTIONAL - Bedrock model id used when LLM=claude                        |
+| ALLOWED_GIT_HOSTS      | github.com,gitlab.com,bitbucket.org | OPTIONAL - Hosts the loader may clone from                             |
 
 ## LLM Configuration
 MacOS and Linux users can use any LLM that's available via Ollama. Check the "tags" section under the model page you want to use on https://ollama.ai/library and write the tag for the value of the environment variable `LLM=` in th e`.env` file.
@@ -125,44 +127,59 @@ Not supported by Ollama, so Windows users need to generate a OpenAI API key and 
 > [!WARNING]
 > There is a performance issue that impacts python applications in the latest release of Docker Desktop. Until a fix is available, please use [version `4.23.0`](https://docs.docker.com/desktop/release-notes/#4230) or earlier.
 
-**1. Index a codebase**
+**1. Set the model**
 
-`genai_stack.extract` parses a TS/JS repository with tree-sitter and writes one
-JSON record per file: the functions, methods, classes and types it defines, the
-names each of them calls, and the modules the file imports. It runs on the host
-and needs only the tree-sitter packages:
+In `.env` use a code model, for example `LLM=codellama` and
+`EMBEDDING_MODEL=sentence_transformer`.
+
+**2. Start everything**
 
 ```bash
-pip install tree-sitter tree-sitter-typescript tree-sitter-javascript
+docker compose up
+```
+
+**3. Index a repository**
+
+Open the loader at http://localhost:8502, paste a public repository URL, and
+press **Index repository**. It clones the repo, parses it, embeds every symbol
+and builds the graph — no host-side step. `owner/repo` shorthand works too, and
+a `/tree/<branch>` URL selects that branch.
+
+> The repository is **cloned and parsed, never executed** — there is no install
+> or build step, so no `postinstall` or other lifecycle script runs. Only
+> public repos over `https://`, restricted to the hosts in `ALLOWED_GIT_HOSTS`.
+
+When the import finishes the loader reports how many files, symbols, call edges
+and import edges landed. **Cross-file call edges are the number to watch** —
+they are what retrieval traverses to reach code a question does not name.
+
+The import is idempotent: re-importing updates nodes in place rather than
+duplicating them, and "Delete imported graph" under *Danger zone* clears it out.
+
+### Indexing from the command line
+
+The same pipeline runs headless, against a URL or a local checkout:
+
+```bash
+python3 -m genai_stack.extract --github-url sindresorhus/ky
 ```
 
 ```bash
 python3 -m genai_stack.extract --repo ../Rocket.Chat
 ```
 
-Useful flags: `--ignore-dir` / `--ignore-glob` to skip paths, `--max-chars` to
-change where long symbols are truncated (the default of 4000 is chosen to fit
-the retriever's `k=4` inside the model context), `--min-chars` to drop trivial
-one-liners.
-
-The `index/` directory is mounted into the loader container, so re-indexing a
-repository never requires a rebuild.
-
-**2. Set the model**
-
-In `.env` use a code model, for example `LLM=codellama` and
-`EMBEDDING_MODEL=sentence_transformer`.
-
-**3. Start everything**
+On the host this needs only the tree-sitter packages, not the full stack:
 
 ```bash
-docker compose up
+pip install tree-sitter tree-sitter-typescript tree-sitter-javascript
 ```
 
-Then open the loader at http://localhost:8502 and press **Import** to embed the
-symbols and write them to Neo4j. The importer is idempotent: re-importing
-updates existing nodes rather than duplicating them, and "Delete imported graph"
-under *Danger zone* clears them out.
+Useful flags: `--branch`, `--ignore-dir` / `--ignore-glob` to skip paths,
+`--max-chars` to change where long symbols are truncated (the default of 4000
+fits the retriever's `k=4` inside the model context), `--min-chars` to drop
+trivial one-liners. The output lands in `index/`, which is mounted into the
+loader container, so the *From an index file* tab can import it without a
+rebuild.
 If changes to build scripts has been made, **rebuild**.
 ```
 docker compose up --build
@@ -228,8 +245,11 @@ DB client: http://localhost:7474
 UI: http://localhost:8502
 DB client: http://localhost:7474
 
-- import the code index into the `(:File)-[:CONTAINS]->(:Code)` graph and
-  build its `CALLS` and `IMPORTS` relationships
+- paste a public repository URL and it clones, parses, embeds and builds the
+  graph in one step
+- or import an index file produced by `genai_stack.extract`
+- builds the `(:File)-[:CONTAINS]->(:Code)` graph plus its `CALLS` and
+  `IMPORTS` relationships
 - embed each symbol and store the vector on the `Code` node, backed by a vector
   index and a full-text index for hybrid search
 - UI: pick or upload an index, run the import, watch progress, clear the graph
