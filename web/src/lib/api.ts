@@ -212,6 +212,20 @@ export function indexRepository(
   return () => source.close();
 }
 
+/** Import an index built by the extract CLI - how a local checkout gets in. */
+export async function importIndexFile(
+  file: File,
+): Promise<{ imported: number; repo: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await fetch(`${BASE}/graph/import`, {
+    method: "POST",
+    headers: headers(),
+    body: form,
+  });
+  return json<{ imported: number; repo: string }>(response);
+}
+
 // ---------------------------------------------------------------------------
 // Uploaded PDFs
 // ---------------------------------------------------------------------------

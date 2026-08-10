@@ -501,6 +501,40 @@ def index_repository(request: IndexRequest = Depends()):
     return EventSourceResponse(generate(), media_type="text/event-stream")
 
 
+@app.post("/graph/import", dependencies=guarded)
+async def import_index_file(file: UploadFile = File(...)):
+    """Import an index built by `python3 -m genai_stack.extract`.
+
+    The CLI only writes JSON, and /graph/index only clones from an allowed
+    host - so this is what puts a local checkout into the graph.
+    """
+    try:
+        index = json.loads(await file.read())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Not valid JSON: {exc}")
+
+    if not isinstance(index, dict) or "files" not in index:
+        raise HTTPException(
+            status_code=422,
+            detail="Not a code index - expected an object with a 'files' key",
+        )
+    if not count_symbols(index):
+        raise HTTPException(status_code=422, detail="The index contains no symbols")
+
+    imported = import_index(
+        index,
+        graph=neo4j_graph,
+        embeddings=embeddings,
+        batch_size=settings.import_batch_size,
+    )
+    record_import(neo4j_graph, index, imported)
+    return {
+        "imported": imported,
+        "repo": index.get("repo") or "unknown",
+        "counts": neo4j_graph.query(GRAPH_COUNTS)[0],
+    }
+
+
 # --------------------------------------------------------------------------
 # Uploaded PDFs
 # --------------------------------------------------------------------------

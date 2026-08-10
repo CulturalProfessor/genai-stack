@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   clearGraph,
   getGraph,
+  importIndexFile,
   indexRepository,
   type GraphSummary,
   type IndexProgress,
@@ -41,7 +42,9 @@ export function IndexView() {
   const [progress, setProgress] = useState<IndexProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
   const stop = useRef<(() => void) | null>(null);
+  const picker = useRef<HTMLInputElement>(null);
 
   const load = () => getGraph().then(setGraph).catch((exc: Error) => setError(exc.message));
 
@@ -68,6 +71,21 @@ export function IndexView() {
         setError(message);
       },
     });
+  };
+
+  const importFile = async (file: File) => {
+    setError(null);
+    setDone(null);
+    setImporting(true);
+    try {
+      const { imported, repo } = await importIndexFile(file);
+      setDone(`Imported ${imported.toLocaleString()} symbols from ${repo}`);
+      load();
+    } catch (exc) {
+      setError((exc as Error).message);
+    } finally {
+      setImporting(false);
+    }
   };
 
   const percent =
@@ -172,6 +190,31 @@ export function IndexView() {
             Public repositories only, from {graph?.allowed_hosts.join(", ") ?? "..."}.
             Only .ts, .tsx, .js and .jsx files are understood.
           </p>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
+            <input
+              ref={picker}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) importFile(file);
+                event.target.value = "";
+              }}
+            />
+            <Button
+              variant="outline"
+              disabled={progress !== null || importing}
+              onClick={() => picker.current?.click()}
+            >
+              <Upload /> {importing ? "Importing..." : "Import an index file"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              For a local checkout: <code className="text-[0.7rem]">python3 -m
+              genai_stack.extract --repo /path/to/repo</code>, then import the JSON.
+            </span>
+          </div>
 
           {progress && (
             <div className="mt-4">
