@@ -28,6 +28,7 @@ from genai_stack.pdf_store import (
 )
 from conversation_ui import conversation_sidebar, current_conversation_id
 from page_chat import StreamHandler
+import theme
 from resources import (
     get_embeddings,
     get_graph,
@@ -100,17 +101,18 @@ def ingest(graph, uploaded) -> str | None:
 
 def document_sidebar(graph, documents, selected: str | None) -> None:
     with st.sidebar:
-        st.markdown("#### PDFs")
+        theme.sidebar_label("Documents")
         if not documents:
-            st.caption("Upload one to get started.")
+            st.caption("Upload a PDF to get started.")
             return
 
         for document in documents:
-            open_col, menu_col = st.columns([5, 1])
+            open_col, menu_col = st.columns([6, 1], vertical_alignment="center")
             open_col.button(
                 document.name,
                 key=f"pdf-{document.id}",
                 width="stretch",
+                help=document.name if len(document.name) > 28 else None,
                 type="primary" if document.id == selected else "secondary",
                 on_click=lambda did=document.id: st.session_state.update(
                     {SELECTED_DOCUMENT: did}
@@ -152,7 +154,7 @@ def answer(document, question: str, callbacks) -> str:
 
 
 def render() -> None:
-    st.header("Chat with a PDF")
+    theme.apply()
 
     try:
         graph = get_graph()
@@ -161,7 +163,11 @@ def render() -> None:
         st.error(f"Neo4j is not reachable: {exc}", icon="🚨")
         return
 
-    uploaded = st.file_uploader("Upload a PDF", type="pdf")
+    with st.sidebar:
+        theme.sidebar_label("Add a document")
+        uploaded = st.file_uploader(
+            "Upload a PDF", type="pdf", label_visibility="collapsed"
+        )
     if uploaded is not None:
         try:
             doc_id = ingest(graph, uploaded)
@@ -177,24 +183,27 @@ def render() -> None:
     document_sidebar(graph, documents, document.id if document else None)
 
     if document is None:
-        st.caption(
-            "Stored separately from the code graph, under its own `PdfBotChunk` "
-            "label. Uploaded PDFs stay until you delete them."
+        theme.empty_state(
+            "Chat with a PDF",
+            "Upload one from the sidebar. Documents are kept until you delete "
+            "them, each with its own chats.",
         )
         return
-
-    st.caption(
-        f"Asking **{document.name}** - {document.pages} pages, "
-        f"{document.chunks} chunks. Answers come from this document only."
-    )
 
     conversation_id = current_conversation_id(graph, kind=KIND_PDF, subject=document.id)
     conversation_sidebar(graph, kind=KIND_PDF, subject=document.id)
     messages = load_messages(graph, conversation_id)
 
-    for message in messages:
-        with st.chat_message(message.role):
-            st.write(message.content)
+    if messages:
+        for message in messages:
+            with st.chat_message(message.role):
+                st.write(message.content)
+    else:
+        theme.empty_state(
+            document.name,
+            f"{document.pages} pages, {document.chunks} chunks. "
+            "Answers come from this document only.",
+        )
 
     question = st.chat_input(f"Ask a question about {document.name}")
     if not question:

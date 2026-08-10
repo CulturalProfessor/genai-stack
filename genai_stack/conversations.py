@@ -238,6 +238,43 @@ def delete_conversations_for(graph, subject: str) -> None:
     )
 
 
+def group_by_age(
+    conversations: list[Conversation], now: datetime | None = None
+) -> list[tuple[str, list[Conversation]]]:
+    """Conversations bucketed the way every chat sidebar buckets them.
+
+    Returns (heading, conversations) in order, skipping empty buckets, so the
+    caller can render headings without deciding what the buckets are.
+    """
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+    buckets: dict[str, list[Conversation]] = {}
+
+    for conversation in conversations:
+        try:
+            updated = datetime.fromisoformat(conversation.updated_at).date()
+        except (TypeError, ValueError):
+            # A row written by hand, or by an older version. Better in the last
+            # bucket than crashing the sidebar.
+            heading = "Older"
+        else:
+            age = (today - updated).days
+            if age <= 0:
+                heading = "Today"
+            elif age == 1:
+                heading = "Yesterday"
+            elif age <= 7:
+                heading = "Previous 7 days"
+            elif age <= 30:
+                heading = "Previous 30 days"
+            else:
+                heading = "Older"
+        buckets.setdefault(heading, []).append(conversation)
+
+    order = ["Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"]
+    return [(heading, buckets[heading]) for heading in order if heading in buckets]
+
+
 def chat_history(messages: list[Message], limit: int = 6) -> list[tuple[str, str]]:
     """Recent turns as (question, answer) pairs for a chain's chat_history.
 

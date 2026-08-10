@@ -16,6 +16,7 @@ from genai_stack.ingest import (
 )
 from genai_stack.sources import allowed_hosts, cloned_repository, parse_repo_url
 from resources import get_embeddings, get_graph, get_settings
+import theme
 
 logger = get_logger(__name__)
 
@@ -227,6 +228,7 @@ def from_file() -> None:
 
 
 def render() -> None:
+    theme.apply(theme.PAGE_WIDTH)
     st.header("Index a repository")
     st.caption("Explore the result at http://localhost:7474")
 

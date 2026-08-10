@@ -13,9 +13,11 @@ from genai_stack.conversations import (
     create_conversation,
     delete_conversation,
     get_conversation,
+    group_by_age,
     list_conversations,
     rename_conversation,
 )
+import theme
 
 # The selected conversation is per kind and per subject: switching to the PDF
 # page must not drag the code chat's selection along with it.
@@ -75,54 +77,64 @@ def _rename_form(graph, conversation, key: str, renaming_key: str) -> None:
             st.rerun()
 
 
+def _row(graph, conversation, active, selection_key, renaming_key) -> None:
+    key = conversation.id
+    open_col, menu_col = st.columns([6, 1], vertical_alignment="center")
+    label = conversation.title
+    if label == UNTITLED:
+        label = f"_{UNTITLED}_"
+    open_col.button(
+        label,
+        key=f"open-{key}",
+        width="stretch",
+        help=conversation.title if len(conversation.title) > 28 else None,
+        # The open chat reads as selected; theme.py styles the two states.
+        type="secondary" if key != active else "primary",
+        on_click=lambda cid=key: st.session_state.update({selection_key: cid}),
+    )
+    with menu_col.popover("⋯", width="stretch"):
+        st.caption(f"{conversation.message_count} messages")
+        if st.button("Rename", key=f"rename-{key}", width="stretch"):
+            st.session_state[renaming_key] = key
+            st.rerun()
+        if st.button("Delete", key=f"delete-{key}", width="stretch"):
+            delete_conversation(graph, key)
+            if st.session_state.get(selection_key) == key:
+                st.session_state[selection_key] = None
+            st.rerun()
+
+
 def conversation_sidebar(
-    graph, kind: str, subject: str | None = None, header: str = "Conversations"
+    graph, kind: str, subject: str | None = None, header: str = "Chats"
 ) -> None:
     selection_key = _selection_key(kind, subject)
     renaming_key = _renaming_key(kind, subject)
     active = st.session_state.get(selection_key)
 
     with st.sidebar:
-        st.markdown(f"#### {header}")
-
-        if st.button(
-            "New chat", key=f"new-{kind}-{subject}", width="stretch",
-            type="primary",
-        ):
-            start_new(graph, kind, subject)
-            st.session_state[renaming_key] = None
-            st.rerun()
+        # Keyed so the stylesheet can pick this one button out of the sidebar
+        # and leave the conversation rows looking like rows.
+        with st.container(key="new-chat"):
+            if st.button(
+                "➕  New chat", key=f"new-{kind}-{subject}", width="stretch",
+                type="primary",
+            ):
+                start_new(graph, kind, subject)
+                st.session_state[renaming_key] = None
+                st.rerun()
 
         conversations = list_conversations(graph, kind=kind, subject=subject)
         if not conversations:
-            st.caption("No conversations yet.")
+            theme.sidebar_label(header)
+            st.caption("No chats yet.")
             return
 
-        for conversation in conversations:
-            key = conversation.id
-            if st.session_state.get(renaming_key) == key:
-                _rename_form(graph, conversation, key, renaming_key)
-                continue
-
-            open_col, menu_col = st.columns([5, 1])
-            label = conversation.title
-            if conversation.title == UNTITLED:
-                label = f"_{UNTITLED}_"
-            open_col.button(
-                label,
-                key=f"open-{key}",
-                width="stretch",
-                # The open chat is the filled one, so the list shows where you are.
-                type="secondary" if key != active else "primary",
-                on_click=lambda cid=key: st.session_state.update({selection_key: cid}),
-            )
-            with menu_col.popover("⋯", width="stretch"):
-                st.caption(f"{conversation.message_count} messages")
-                if st.button("Rename", key=f"rename-{key}", width="stretch"):
-                    st.session_state[renaming_key] = key
-                    st.rerun()
-                if st.button("Delete", key=f"delete-{key}", width="stretch"):
-                    delete_conversation(graph, key)
-                    if st.session_state.get(selection_key) == key:
-                        st.session_state[selection_key] = None
-                    st.rerun()
+        for heading, bucket in group_by_age(conversations):
+            theme.sidebar_label(heading)
+            for conversation in bucket:
+                if st.session_state.get(renaming_key) == conversation.id:
+                    _rename_form(
+                        graph, conversation, conversation.id, renaming_key
+                    )
+                    continue
+                _row(graph, conversation, active, selection_key, renaming_key)

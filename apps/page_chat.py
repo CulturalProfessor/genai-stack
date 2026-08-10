@@ -14,11 +14,23 @@ from genai_stack.conversations import (
     set_title_if_untitled,
 )
 from conversation_ui import conversation_sidebar, current_conversation_id
-from resources import get_chains, get_graph, get_settings, llm_unavailable
+from resources import get_chains, get_graph, llm_unavailable
+import theme
 
 logger = get_logger(__name__)
 
 MODES = ["Graph RAG", "LLM only"]
+
+# Shown on an empty chat. Deliberately about structure rather than any one
+# repository, since the graph holds whatever you last indexed.
+STARTERS = [
+    "What does this codebase do?",
+    "How does error handling work?",
+    "Where do requests get retried?",
+    "Which files depend on each other most?",
+]
+
+PENDING = "chat:pending"
 
 
 class StreamHandler(BaseCallbackHandler):
@@ -35,9 +47,29 @@ def replay(messages) -> None:
     """Every message of the conversation, oldest first."""
     for message in messages:
         with st.chat_message(message.role):
-            if message.mode:
-                st.caption(f"RAG: {message.mode}")
             st.write(message.content)
+
+
+def starters() -> None:
+    """An empty chat offers somewhere to start rather than a blank page."""
+    theme.empty_state(
+        "Ask the codebase",
+        "Answers come from the indexed code and the call graph around it.",
+    )
+    with st.container(key="starters"):
+        columns = st.columns(2)
+        for index, starter in enumerate(STARTERS):
+            if columns[index % 2].button(
+                starter, key=f"starter-{index}", width="stretch"
+            ):
+                st.session_state[PENDING] = starter
+                st.rerun()
+
+
+def taken_question() -> str | None:
+    """The typed question, or one a starter button queued for this rerun."""
+    pending = st.session_state.pop(PENDING, None)
+    return pending or st.chat_input("Ask about the indexed code")
 
 
 def ticket_expander(question: str, key: str) -> None:
@@ -60,7 +92,7 @@ def ticket_expander(question: str, key: str) -> None:
 
 
 def render() -> None:
-    st.header("Ask the codebase")
+    theme.apply()
 
     try:
         graph = get_graph()
@@ -75,24 +107,35 @@ def render() -> None:
     conversation_sidebar(graph, kind=KIND_CODE)
     messages = load_messages(graph, conversation_id)
 
-    mode = st.radio(
-        "Retrieval", MODES, horizontal=True,
-        help="Graph RAG searches the indexed code and follows its call and import edges. "
-             "LLM only answers from the model's own knowledge.",
-    )
-    st.caption(f"Model: `{get_settings().llm}`")
+    with st.sidebar:
+        theme.sidebar_label("Retrieval")
+        # A radio rather than st.segmented_control: theme.py styles it into the
+        # same thing, and Streamlit's AppTest cannot rerun a page containing a
+        # segmented_control or pills, which would cost the tests for this page.
+        with st.container(key="retrieval"):
+            mode = st.radio(
+                "Retrieval",
+                MODES,
+                horizontal=True,
+                label_visibility="collapsed",
+                help="Graph RAG searches the indexed code and follows its call "
+                     "and import edges. LLM only answers from the model's own "
+                     "knowledge.",
+            )
 
-    replay(messages)
+    if messages:
+        replay(messages)
+        if messages[-1].role == "assistant":
+            # Only the newest turn - a ticket per historic message would be noise.
+            last_question = next(
+                (m.content for m in reversed(messages) if m.role == "user"), None
+            )
+            if last_question:
+                ticket_expander(last_question, key=messages[-1].id)
+    else:
+        starters()
 
-    if messages and messages[-1].role == "assistant":
-        # Only the newest turn - a ticket per historic message would be noise.
-        last_question = next(
-            (m.content for m in reversed(messages) if m.role == "user"), None
-        )
-        if last_question:
-            ticket_expander(last_question, key=messages[-1].id)
-
-    question = st.chat_input("What would you like to know about this codebase?")
+    question = taken_question()
     if not question:
         return
 
@@ -111,7 +154,6 @@ def render() -> None:
     with st.chat_message("user"):
         st.write(question)
     with st.chat_message("assistant"):
-        st.caption(f"RAG: {mode}")
         try:
             answer = answer_question(
                 rag_chain if mode == "Graph RAG" else llm_chain,

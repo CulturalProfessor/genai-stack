@@ -1,7 +1,6 @@
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -12,6 +11,7 @@ from genai_stack.conversations import (
     append_message,
     chat_history,
     create_conversation,
+    group_by_age,
     list_conversations,
     load_messages,
     rename_conversation,
@@ -134,6 +134,72 @@ def test_rename_conversation_falls_back_on_a_blank_title():
 
     _, params = graph.calls[0]
     assert params["title"] == UNTITLED
+
+
+def _conversation(name, updated_at):
+    return Conversation(
+        id=name,
+        kind="code",
+        title=name,
+        created_at=updated_at,
+        updated_at=updated_at,
+        message_count=2,
+    )
+
+
+NOW = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
+
+
+def test_group_by_age_buckets_in_order():
+    conversations = [
+        _conversation("today", "2026-08-11T09:00:00+00:00"),
+        _conversation("yesterday", "2026-08-10T23:00:00+00:00"),
+        _conversation("this-week", "2026-08-06T09:00:00+00:00"),
+        _conversation("this-month", "2026-07-20T09:00:00+00:00"),
+        _conversation("ancient", "2025-01-01T09:00:00+00:00"),
+    ]
+    grouped = group_by_age(conversations, now=NOW)
+
+    assert [heading for heading, _ in grouped] == [
+        "Today",
+        "Yesterday",
+        "Previous 7 days",
+        "Previous 30 days",
+        "Older",
+    ]
+    assert [c[0].id for _, c in grouped] == [
+        "today",
+        "yesterday",
+        "this-week",
+        "this-month",
+        "ancient",
+    ]
+
+
+def test_group_by_age_skips_empty_buckets():
+    grouped = group_by_age(
+        [_conversation("today", "2026-08-11T01:00:00+00:00")], now=NOW
+    )
+    assert [heading for heading, _ in grouped] == ["Today"]
+
+
+def test_group_by_age_keeps_order_within_a_bucket():
+    conversations = [
+        _conversation("newer", "2026-08-11T11:00:00+00:00"),
+        _conversation("older", "2026-08-11T02:00:00+00:00"),
+    ]
+    _, bucket = group_by_age(conversations, now=NOW)[0]
+    assert [c.id for c in bucket] == ["newer", "older"]
+
+
+def test_group_by_age_survives_an_unparseable_timestamp():
+    """A hand-written row should not take the whole sidebar down."""
+    grouped = group_by_age([_conversation("odd", "not a date")], now=NOW)
+    assert [heading for heading, _ in grouped] == ["Older"]
+
+
+def test_group_by_age_of_nothing():
+    assert group_by_age([], now=NOW) == []
 
 
 def _message(role, content):
