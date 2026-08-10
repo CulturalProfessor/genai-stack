@@ -2,10 +2,10 @@ import os
 
 import streamlit as st
 from langchain.chains import RetrievalQA
-from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.vectorstores.neo4j_vector import Neo4jVector
+from pypdf import PdfReader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_neo4j import Neo4jVector
 from streamlit.logger import get_logger
 from chains import (
     load_embedding_model,
@@ -24,6 +24,8 @@ password = os.getenv("NEO4J_PASSWORD")
 ollama_base_url = os.getenv("OLLAMA_BASE_URL")
 embedding_model_name = os.getenv("EMBEDDING_MODEL")
 llm_name = os.getenv("LLM")
+if not url:
+    raise RuntimeError("NEO4J_URI is not set - copy env.example to .env first")
 # Remapping for Langchain Neo4j integration
 os.environ["NEO4J_URL"] = url
 

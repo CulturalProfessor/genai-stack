@@ -1,16 +1,17 @@
-FROM langchain/langchain
+# Pinned base: the previous `langchain/langchain` image floated and supplied
+# langchain implicitly, so builds were not reproducible.
+FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-RUN pip install --upgrade -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 COPY utils.py .

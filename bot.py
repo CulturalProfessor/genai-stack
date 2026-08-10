@@ -2,10 +2,11 @@ import os
 
 import streamlit as st
 from streamlit.logger import get_logger
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.graphs import Neo4jGraph
+from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_neo4j import Neo4jGraph
 from dotenv import load_dotenv
 from utils import (
+    create_fulltext_index,
     create_vector_index,
 )
 from chains import (
@@ -24,6 +25,8 @@ password = os.getenv("NEO4J_PASSWORD")
 ollama_base_url = os.getenv("OLLAMA_BASE_URL")
 embedding_model_name = os.getenv("EMBEDDING_MODEL")
 llm_name = os.getenv("LLM")
+if not url:
+    raise RuntimeError("NEO4J_URI is not set - copy env.example to .env first")
 # Remapping for Langchain Neo4j integration
 os.environ["NEO4J_URL"] = url
 
@@ -35,6 +38,7 @@ embeddings, dimension = load_embedding_model(
     embedding_model_name, config={"ollama_base_url": ollama_base_url}, logger=logger
 )
 create_vector_index(neo4j_graph, dimension)
+create_fulltext_index(neo4j_graph)
 
 
 class StreamHandler(BaseCallbackHandler):
