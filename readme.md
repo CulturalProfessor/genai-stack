@@ -64,6 +64,7 @@ exactly, which lexical matching handles better than embeddings.
 ## Layout
 
 ```
+Dockerfile           one image, shared by all four Python services
 genai_stack/         the library - no app code
   settings.py        environment configuration, read once
   extract.py         tree-sitter parsing of a repo into symbols and edges
@@ -89,7 +90,7 @@ Available variables:
 | NEO4J_URI              | neo4j://database:7687              | REQUIRED - URL to Neo4j database                                        |
 | NEO4J_USERNAME         | neo4j                              | REQUIRED - Username for Neo4j database                                  |
 | NEO4J_PASSWORD         | password                           | REQUIRED - Password for Neo4j database                                  |
-| LLM                    | llama2                             | REQUIRED - Any Ollama model tag, or gpt-4, gpt-3.5, or claude (Bedrock) |
+| LLM                    | qwen2.5-coder:1.5b                 | REQUIRED - Any Ollama model tag, or gpt-4, gpt-3.5, or claude (Bedrock) |
 | EMBEDDING_MODEL        | sentence_transformer               | REQUIRED - Can be sentence_transformer, openai, aws or ollama           |
 | AWS_ACCESS_KEY_ID      |                                    | REQUIRED - Only if LLM=claude or embedding_model=aws                    |
 | AWS_SECRET_ACCESS_KEY  |                                    | REQUIRED - Only if LLM=claude or embedding_model=aws                    |
@@ -129,14 +130,37 @@ Not supported by Ollama, so Windows users need to generate a OpenAI API key and 
 
 **1. Set the model**
 
-In `.env` use a code model, for example `LLM=codellama` and
-`EMBEDDING_MODEL=sentence_transformer`.
+The default is `LLM=qwen2.5-coder:1.5b` — a code model small enough to run
+comfortably on a laptop. Pick by the RAM you can spare:
+
+| `LLM=` | Download | RAM while running | Notes |
+|---|---|---|---|
+| `qwen2.5-coder:1.5b` | ~1.0 GB | ~1.5 GB | Default. Code-specific, fine for this. |
+| `qwen2.5-coder:7b` | ~4.7 GB | ~6 GB | Noticeably better answers if you have the room. |
+| `llama3.2:3b` | ~2.0 GB | ~3 GB | General purpose. |
+| `gpt-3.5` / `gpt-4` | none | none | Needs `OPENAI_API_KEY`; nothing is downloaded. |
+
+`EMBEDDING_MODEL=sentence_transformer` runs locally and only costs ~90 MB.
+
+Disk budget for the whole stack: ~2 GB app image, ~0.6 GB Neo4j, ~0.25 GB
+front-end, plus the model if you run Ollama locally (~4.5 GB for the Ollama
+image itself).
 
 **2. Start everything**
 
 ```bash
 docker compose up
 ```
+
+On Linux this needs an LLM to talk to. Either run Ollama in a container:
+
+```bash
+docker compose --profile linux up
+```
+
+...with `OLLAMA_BASE_URL=http://llm:11434` in `.env`, or set `LLM=gpt-3.5` and
+an `OPENAI_API_KEY` and nothing gets downloaded at all. Without one of these the
+`pull-model` service fails and the app services wait on it forever.
 
 **3. Index a repository**
 
