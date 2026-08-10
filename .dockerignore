@@ -1,6 +1,18 @@
-*
-!*.py
-!requirements.txt
-!images/*
-!front-end/*
-front-end/node_modules/*
+# Exclude-list rather than an allow-list: the previous `*` + `!*.py` form only
+# un-excluded top-level .py files, so the genai_stack/ and apps/ packages would
+# never reach the build context.
+.git
+.github
+.vscode
+.env
+data
+images
+tests
+*.md
+LICENSE
+**/__pycache__
+**/*.pyc
+.pytest_cache
+front-end/node_modules
+embedding_model/*
+!embedding_model/.ignore
