@@ -76,10 +76,9 @@ services:
     networks:
       - net
     depends_on:
+      # No LLM needed to index a repository - only embeddings and the database.
       database:
         condition: service_healthy
-      pull-model:
-        condition: service_completed_successfully
     x-develop:
       watch:
         - action: rebuild
