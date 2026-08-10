@@ -105,12 +105,28 @@
      an element after it - a block-level sibling starts its own line, which is
      what stranded the caret below the answer.
 
-     Two rules, not one with an override: a list's own ::after renders below
-     the list, and `:not(ul)` cannot be outweighed by a plain `ol` selector,
-     since :last-child already counts for more than a type name. So each case
-     selects only what it should draw on. */
+     It has to land on the deepest last element, not the outermost one: an
+     ::after on a list renders below the list, and on a list item that itself
+     contains a nested list it renders below that nested list. So walk the
+     chain of last children explicitly, and let only a leaf draw - the
+     :not(:has(ul, ol)) guard stops an outer level drawing a second caret.
+     Three levels is deeper than any answer this produces. */
   .prose-answer.is-streaming > :last-child:not(ul):not(ol)::after,
-  .prose-answer.is-streaming > :is(ul, ol):last-child > li:last-child::after {
+  .prose-answer.is-streaming
+    > :is(ul, ol):last-child
+    > li:last-child:not(:has(ul, ol))::after,
+  .prose-answer.is-streaming
+    > :is(ul, ol):last-child
+    > li:last-child
+    > :is(ul, ol):last-child
+    > li:last-child:not(:has(ul, ol))::after,
+  .prose-answer.is-streaming
+    > :is(ul, ol):last-child
+    > li:last-child
+    > :is(ul, ol):last-child
+    > li:last-child
+    > :is(ul, ol):last-child
+    > li:last-child::after {
     content: "";
     display: inline-block;
     width: 2px;
