@@ -135,8 +135,31 @@ services:
     ports:
       - 8504:8504
 
+  web:
+    # The React client for the chat, over the API. Runs the Vite dev server
+    # with the source mounted, so an edit is on screen without a rebuild.
+    build:
+      dockerfile: web.Dockerfile
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL-http://localhost:8504}
+      - VITE_API_KEY=${API_KEY-}
+    volumes:
+      - ./web/src:/app/src
+      - ./web/index.html:/app/index.html
+      - ./web/tailwind.config.js:/app/tailwind.config.js
+      # Not the whole directory: that would shadow the image's node_modules
+      # with the host's, which on Linux is usually absent or built for a
+      # different platform.
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - net
+    ports:
+      - 5173:5173
+
   front-end:
-    # Optional alternative client for the API. Not part of the default stack -
+    # The older Svelte client, kept until the React one covers everything.
     # `docker compose --profile frontend up` to run it.
     profiles: ["frontend"]
     build:
