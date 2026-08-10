@@ -4,6 +4,7 @@ import sys
 import time
 from collections import defaultdict, deque
 from collections.abc import Generator
+from dataclasses import asdict
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
@@ -22,6 +23,18 @@ from genai_stack.chains import (
     configure_llm_only_chain,
     configure_qa_rag_chain,
     generate_ticket,
+)
+from genai_stack.conversations import (
+    KIND_CODE,
+    append_message,
+    chat_history,
+    create_conversation,
+    delete_conversation,
+    get_conversation,
+    list_conversations,
+    load_messages,
+    rename_conversation,
+    set_title_if_untitled,
 )
 from genai_stack.llm import load_embedding_model, load_llm
 from genai_stack.schema import BaseLogger, apply_schema
@@ -194,6 +207,115 @@ async def ask(question: Question):
     answer = answer_question(_chain_for(question.rag), question.text)
 
     return {"result": answer, "model": llm_name}
+
+
+# --------------------------------------------------------------------------
+# Conversations
+#
+# The same store the Streamlit app uses, so a chat started in one shows up in
+# the other. Everything here is a thin wrapper over genai_stack.conversations.
+# --------------------------------------------------------------------------
+
+
+class NewConversation(BaseModel):
+    kind: str = KIND_CODE
+    subject: str | None = None
+
+
+class RenameConversation(BaseModel):
+    title: str
+
+
+class Ask(BaseModel):
+    text: str
+    rag: bool = True
+
+
+def _conversation_or_404(conversation_id: str):
+    conversation = get_conversation(neo4j_graph, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="No such conversation")
+    return conversation
+
+
+@app.get("/conversations", dependencies=guarded)
+async def conversations(kind: str = KIND_CODE, subject: str | None = None):
+    return {
+        "conversations": [
+            asdict(c) for c in list_conversations(neo4j_graph, kind=kind, subject=subject)
+        ]
+    }
+
+
+@app.post("/conversations", dependencies=guarded)
+async def new_conversation(body: NewConversation):
+    conversation_id = create_conversation(
+        neo4j_graph, kind=body.kind, subject=body.subject
+    )
+    return asdict(_conversation_or_404(conversation_id))
+
+
+@app.get("/conversations/{conversation_id}", dependencies=guarded)
+async def one_conversation(conversation_id: str):
+    conversation = _conversation_or_404(conversation_id)
+    return {
+        "conversation": asdict(conversation),
+        "messages": [asdict(m) for m in load_messages(neo4j_graph, conversation_id)],
+    }
+
+
+@app.patch("/conversations/{conversation_id}", dependencies=guarded)
+async def rename(conversation_id: str, body: RenameConversation):
+    _conversation_or_404(conversation_id)
+    rename_conversation(neo4j_graph, conversation_id, body.title)
+    return asdict(_conversation_or_404(conversation_id))
+
+
+@app.delete("/conversations/{conversation_id}", dependencies=guarded)
+async def remove_conversation(conversation_id: str):
+    _conversation_or_404(conversation_id)
+    delete_conversation(neo4j_graph, conversation_id)
+    return {"deleted": conversation_id}
+
+
+# EventSource only issues GET requests, so the question travels as a query
+# parameter here just as it does on /query-stream.
+@app.get("/conversations/{conversation_id}/ask", dependencies=guarded)
+def ask_in_conversation(conversation_id: str, question: Ask = Depends()):
+    _conversation_or_404(conversation_id)
+    history = chat_history(load_messages(neo4j_graph, conversation_id))
+    mode = "Graph RAG" if question.rag else "LLM only"
+
+    # Saved before the answer, so a question that fails is not lost.
+    append_message(neo4j_graph, conversation_id, "user", question.text)
+    set_title_if_untitled(neo4j_graph, conversation_id, question.text)
+
+    q = Queue()
+
+    def cb():
+        return answer_question(
+            _chain_for(question.rag),
+            question.text,
+            history=history,
+            callbacks=[QueueCallback(q)],
+        )
+
+    def generate():
+        yield json.dumps({"init": True, "model": llm_name, "mode": mode})
+        answer = ""
+        try:
+            for token, content in stream(cb, q):
+                answer = content
+                yield json.dumps({"token": token})
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client
+            logger.exception("Streaming query failed")
+            yield json.dumps({"error": str(exc)})
+            return
+        append_message(neo4j_graph, conversation_id, "assistant", answer, mode=mode)
+        conversation = get_conversation(neo4j_graph, conversation_id)
+        yield json.dumps({"done": True, "title": conversation.title if conversation else ""})
+
+    return EventSourceResponse(generate(), media_type="text/event-stream")
 
 
 @app.post("/generate-ticket", dependencies=guarded)
