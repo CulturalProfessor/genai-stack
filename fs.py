@@ -1,209 +1,457 @@
-import os
-import chardet
-import logging
+"""Extract code symbols from a TS/JS repository into JSON for the loader.
+
+Walks a repository with tree-sitter and emits one record per file listing the
+functions, methods, classes and type declarations it contains. The output feeds
+``loader.py``, which embeds each symbol and writes it to Neo4j.
+
+Usage:
+    python3 fs.py --repo ../Rocket.Chat --output all_code_blocks.json
+"""
+from __future__ import annotations
+
+import argparse
 import json
+import logging
+import os
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Iterator
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
+import tree_sitter_javascript
+import tree_sitter_typescript
+from tree_sitter import Language, Node, Parser
 
-# The directory path to search in
-dir_path = "../Rocket.Chat"
+logger = logging.getLogger("fs")
 
-# Dictionary to store file content
-file_contents = {}
-
-# List of directories to ignore
-ignore = [
-    "/node_modules",
-    "/.pnp",
-    ".pnp.js",
-    "/coverage",
-    "/.next/",
-    "/out/",
-    "/build",
-    ".DS_Store",
-    "*.pem",
-    "npm-debug.log*",
-    "yarn-debug.log*",
-    "yarn-error.log*",
-    ".env*.local",
-    ".vercel",
-    "*.tsbuildinfo",
-    ".env",
-    "next-env.d.ts",
-    "/.git",
-    "/.husky",
-    "/.vscode",
-    "/.github",
-    "public",
-    "assets",
-    ".yarn",
-    "/_templates",
-    ".houston",
+# Directory names skipped anywhere in the tree, and glob patterns matched
+# against the repo-relative path.
+DEFAULT_IGNORE_DIRS = [
     ".cache",
-    ".json",
-    "/apps/meteor/.meteor",
-    "/apps/meteor/imports",
-    "/apps/meteor/.scripts",
-    "/apps/meteor/tests",
-    "/apps/meteor/app/irc/server",
-    "apps/meteor/app/authentication",
-    "/apps/meteor/app/slashcommands-hide",
-    "/apps/meteor/app/slashcommands-status",
-    "/apps/meteor/app/slashcommands-open",
-    "/apps/meteor/private",
-    "/.changeset",
+    ".changeset",
+    ".git",
+    ".github",
+    ".husky",
+    ".meteor",
+    ".next",
     ".storybook",
+    ".vscode",
+    ".yarn",
+    "__snapshots__",
+    "assets",
+    "build",
+    "coverage",
+    "dist",
+    "i18n",
+    "node_modules",
+    "out",
+    "public",
 ]
+DEFAULT_IGNORE_GLOBS = ["*.min.js", "*.bundle.js", "*.test.*", "*.spec.*"]
 
-# List to store files that encountered errors
-error_files = []
+# tree-sitter grammar to use per file extension.
+LANGUAGE_BY_SUFFIX = {
+    ".ts": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".jsx": "javascript",
+}
 
-# Function to check if a file is binary
-def is_binary(file_path):
-    try:
-        with open(file_path, 'rb') as file:
-            raw_data = file.read(1024)
-        result = chardet.detect(raw_data)
-        return result['encoding'] is None
-    except FileNotFoundError:
-        return False
+# Node types that define a symbol worth embedding on its own.
+FUNCTION_NODES = {
+    "function_declaration",
+    "function_signature",
+    "generator_function_declaration",
+}
+CLASS_NODES = {"class_declaration", "abstract_class_declaration"}
+TYPE_NODES = {"interface_declaration", "type_alias_declaration", "enum_declaration"}
+DECLARATION_NODES = {"lexical_declaration", "variable_declaration"}
+MEMBER_NODES = {
+    "abstract_method_signature",
+    "method_definition",
+    "method_signature",
+    "public_field_definition",
+}
+FUNCTION_VALUE_NODES = {"arrow_function", "function", "function_expression"}
+CALL_NODES = {"call_expression", "new_expression"}
 
-# Function to check if a directory should be ignored
-def should_ignore_directory(dir_path):
-    return any(ignore_dir in dir_path for ignore_dir in ignore) or "i18n" in dir_path
+_PARSERS: dict[str, Parser] = {}
 
-# List of keywords to ignore
-ignored_keywords = ["require", "strict", "import", "export"]
 
-# Add characters or patterns to ignore
-characters_to_ignore = ["#", "*", "!", "$", "+", "-"]
+def get_parser(language: str) -> Parser:
+    """Return a cached parser for one of the grammars in LANGUAGE_BY_SUFFIX."""
+    if language not in _PARSERS:
+        if language == "typescript":
+            grammar = tree_sitter_typescript.language_typescript()
+        elif language == "tsx":
+            grammar = tree_sitter_typescript.language_tsx()
+        elif language == "javascript":
+            grammar = tree_sitter_javascript.language()
+        else:
+            raise ValueError(f"Unsupported language: {language}")
+        _PARSERS[language] = Parser(Language(grammar))
+    return _PARSERS[language]
 
-# Function to extract code from content while ignoring specific characters or patterns
-def extract_code_from_content(content):
-    code_blocks = {}
-    is_inside_code_block = False
-    current_code_block = []
-    current_key = None
 
-    for line in content.split('\n'):
-        # Check if the line contains any of the ignored keywords or characters
-        if any(keyword in line for keyword in ignored_keywords) or any(char in line for char in characters_to_ignore):
-            is_inside_code_block = False
-            current_code_block = []
-            current_key = None
-        elif "const" in line or "function" in line:
-            is_inside_code_block = True
-            current_code_block.append(line)
-            # Extract the "const" or "function" name as the key
-            parts = line.split(' ')
-            if len(parts) > 1:
-                key_candidate = parts[1].split('(')[0].split('=')[0].strip()
-                # Check if the key contains invalid characters
-                if all(char.isalnum() or char == "_" for char in key_candidate):
-                    current_key = key_candidate
+@dataclass
+class Symbol:
+    """One embeddable unit of code."""
 
-        if is_inside_code_block:
-            current_code_block.append(line)
+    id: str
+    name: str
+    qualified_name: str
+    kind: str
+    parent: str | None
+    start_line: int
+    end_line: int
+    signature: str
+    code: str
+    truncated: bool = False
+    # Names invoked inside this symbol. The loader turns these into CALLS
+    # relationships so retrieval can walk from a symbol to what it uses.
+    calls: list[str] = field(default_factory=list)
 
-            if "{" in line:
-                brace_count = line.count("{")
-                if "}" in line:
-                    brace_count -= line.count("}")
-                if brace_count == 0:
-                    # Found the closing brace, end of code block
-                    is_inside_code_block = False
-                    if current_key:
-                        code_blocks[current_key] = "\n".join(current_code_block)
-                    current_code_block = []
-                    current_key = None
 
-    return code_blocks
+@dataclass
+class FileRecord:
+    path: str
+    name: str
+    language: str
+    depth: int
+    symbols: list[Symbol] = field(default_factory=list)
+    # Raw module specifiers; the loader resolves the relative ones to files.
+    imports: list[str] = field(default_factory=list)
 
-# Function to calculate the depth of a directory
-def calculate_depth(directory_path):
-    return directory_path.count(os.path.sep)
 
-# Function to calculate the depth rank based on a formula
-def calculate_depth_rank(directory_path):
-    # You can define your formula here based on the directory path
-    # For example, a simple formula could be the depth itself:
-    return calculate_depth(directory_path)
+def is_ignored(rel_path: Path, ignore_dirs: set[str], ignore_globs: list[str]) -> bool:
+    if any(part in ignore_dirs for part in rel_path.parts):
+        return True
+    return any(rel_path.match(pattern) for pattern in ignore_globs)
 
-# Initialize the rank counter
-rank = 1
 
-# Directory depth information for code blocks
-depth_info = {}
+def iter_source_files(
+    repo: Path, ignore_dirs: set[str], ignore_globs: list[str]
+) -> Iterator[tuple[Path, str]]:
+    """Yield (absolute path, language) for every parseable file under repo."""
+    for root, dirnames, filenames in os.walk(repo):
+        # Pruning in place stops os.walk from descending into ignored trees.
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+        for filename in sorted(filenames):
+            language = LANGUAGE_BY_SUFFIX.get(Path(filename).suffix)
+            if language is None:
+                continue
+            path = Path(root) / filename
+            if is_ignored(path.relative_to(repo), ignore_dirs, ignore_globs):
+                continue
+            yield path, language
 
-# Walk through the directory
-for root, dirnames, filenames in os.walk(dir_path):
-    if should_ignore_directory(root):
-        continue
 
-    # Filter out files from the ignored directories
-    filenames = [filename for filename in filenames if not any(
-        ignore_dir in os.path.join(root, filename) for ignore_dir in ignore)]
+def node_text(node: Node, source: bytes) -> str:
+    return source[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
-    # Read and store the content of each text-based file
-    for filename in filenames:
-        file_path = os.path.join(root, filename)
+
+def node_name(node: Node, source: bytes) -> str | None:
+    name = node.child_by_field_name("name")
+    return node_text(name, source) if name is not None else None
+
+
+def signature_of(node: Node, source: bytes) -> str:
+    """The declaration line(s) up to the body, e.g. ``function foo(a: number)``."""
+    body = node.child_by_field_name("body")
+    if body is None:
+        # `const foo = () => {...}`: the body hangs off the assigned function.
+        value = node.child_by_field_name("value")
+        if value is not None:
+            body = value.child_by_field_name("body")
+    end = body.start_byte if body is not None else node.end_byte
+    text = source[node.start_byte : end].decode("utf-8", errors="replace")
+    return " ".join(text.split()).rstrip("{").strip()
+
+
+def class_skeleton(node: Node, source: bytes) -> str:
+    """A class header plus its member signatures, without the member bodies.
+
+    Each method is embedded as its own symbol, so embedding the full class text
+    too would just duplicate that content in the vector store.
+    """
+    lines = [signature_of(node, source) + " {"]
+    body = node.child_by_field_name("body")
+    if body is not None:
+        for member in body.named_children:
+            if member.type in MEMBER_NODES:
+                lines.append("    " + signature_of(member, source))
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def callee_name(node: Node | None, source: bytes) -> str | None:
+    """The name being invoked: `foo()` -> foo, `this.foo()`/`a.b.foo()` -> foo."""
+    if node is None:
+        return None
+    if node.type == "identifier":
+        return node_text(node, source)
+    if node.type == "member_expression":
+        prop = node.child_by_field_name("property")
+        return node_text(prop, source) if prop is not None else None
+    return None
+
+
+def collect_calls(node: Node, source: bytes, exclude: str | None) -> list[str]:
+    """Every function/constructor name invoked anywhere inside `node`."""
+    names: set[str] = set()
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type in CALL_NODES:
+            target = current.child_by_field_name(
+                "function"
+            ) or current.child_by_field_name("constructor")
+            name = callee_name(target, source)
+            # Self-recursion would only add a self-loop to the graph.
+            if name and name != exclude:
+                names.add(name)
+        stack.extend(current.named_children)
+    return sorted(names)
+
+
+def extract_imports(root: Node, source: bytes) -> list[str]:
+    """Module specifiers pulled in by this file, from `import` and `require`."""
+    specifiers: set[str] = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current.type in {"import_statement", "export_statement"}:
+            source_node = current.child_by_field_name("source")
+            if source_node is not None:
+                specifiers.add(node_text(source_node, source).strip("'\"`"))
+        elif current.type == "call_expression":
+            target = current.child_by_field_name("function")
+            if target is not None and node_text(target, source) == "require":
+                args = current.child_by_field_name("arguments")
+                if args is not None and args.named_children:
+                    first = args.named_children[0]
+                    if first.type == "string":
+                        specifiers.add(node_text(first, source).strip("'\"`"))
+        stack.extend(current.named_children)
+    return sorted(specifiers)
+
+
+class SymbolExtractor:
+    """Collects symbols from one parsed file."""
+
+    def __init__(self, source: bytes, rel_path: str, max_chars: int, min_chars: int):
+        self.source = source
+        self.rel_path = rel_path
+        self.max_chars = max_chars
+        self.min_chars = min_chars
+        self.symbols: list[Symbol] = []
+
+    def add(
+        self,
+        node: Node,
+        name: str | None,
+        kind: str,
+        parent: str | None,
+        code: str | None = None,
+        calls: list[str] | None = None,
+    ) -> None:
+        if not name:
+            return
+        code = code if code is not None else node_text(node, self.source)
+        if len(code.strip()) < self.min_chars:
+            return
+        truncated = len(code) > self.max_chars
+        if truncated:
+            code = code[: self.max_chars] + "\n// ... truncated"
+        qualified_name = f"{parent}.{name}" if parent else name
+        start_line = node.start_point[0] + 1
+        self.symbols.append(
+            Symbol(
+                # Line number keeps the id unique when a name repeats in a file,
+                # and keeps it stable across runs when the file is unchanged.
+                id=f"{self.rel_path}:{start_line}:{qualified_name}",
+                name=name,
+                qualified_name=qualified_name,
+                kind=kind,
+                parent=parent,
+                start_line=start_line,
+                end_line=node.end_point[0] + 1,
+                signature=signature_of(node, self.source),
+                code=code,
+                truncated=truncated,
+                calls=(
+                    calls
+                    if calls is not None
+                    else collect_calls(node, self.source, name)
+                ),
+            )
+        )
+
+    def visit(self, node: Node, parent: str | None = None) -> None:
+        for child in node.named_children:
+            kind = child.type
+            if kind == "export_statement" or kind == "ambient_declaration":
+                # Unwrap so `export function foo()` is treated as `function foo()`.
+                self.visit(child, parent)
+            elif kind in CLASS_NODES:
+                name = node_name(child, self.source)
+                # calls=[] because the class symbol is only a skeleton - the
+                # calls inside each body belong to that method's symbol.
+                self.add(
+                    child,
+                    name,
+                    "class",
+                    parent,
+                    code=class_skeleton(child, self.source),
+                    calls=[],
+                )
+                body = child.child_by_field_name("body")
+                if body is not None:
+                    self.visit_members(body, name or parent)
+            elif kind in FUNCTION_NODES:
+                self.add(child, node_name(child, self.source), "function", parent)
+            elif kind in TYPE_NODES:
+                self.add(child, node_name(child, self.source), kind.replace("_declaration", ""), parent)
+            elif kind in DECLARATION_NODES:
+                self.visit_declaration(child, parent)
+            else:
+                # Recurse into namespaces, blocks and anything else that may
+                # wrap a declaration. Recorded nodes are never re-entered, so
+                # nested helpers are captured with their enclosing symbol.
+                self.visit(child, parent)
+
+    def visit_declaration(self, node: Node, parent: str | None) -> None:
+        """Record `const foo = () => {}` style function bindings."""
+        for declarator in node.named_children:
+            if declarator.type != "variable_declarator":
+                continue
+            value = declarator.child_by_field_name("value")
+            if value is not None and value.type in FUNCTION_VALUE_NODES:
+                self.add(declarator, node_name(declarator, self.source), "function", parent)
+
+    def visit_members(self, body: Node, class_name: str | None) -> None:
+        for member in body.named_children:
+            if member.type not in MEMBER_NODES:
+                continue
+            name = node_name(member, self.source)
+            if member.type == "public_field_definition":
+                # Only fields holding a function are worth their own symbol.
+                value = member.child_by_field_name("value")
+                if value is None or value.type not in FUNCTION_VALUE_NODES:
+                    continue
+            self.add(member, name, "method", class_name)
+
+
+def parse_file(
+    source: bytes,
+    language: str,
+    rel_path: str,
+    max_chars: int = 4000,
+    min_chars: int = 0,
+) -> tuple[list[Symbol], list[str]]:
+    """Parse once, returning the file's symbols and its import specifiers."""
+    tree = get_parser(language).parse(source)
+    extractor = SymbolExtractor(source, rel_path, max_chars, min_chars)
+    extractor.visit(tree.root_node)
+    return extractor.symbols, extract_imports(tree.root_node, source)
+
+
+def extract_symbols(
+    source: bytes,
+    language: str,
+    rel_path: str,
+    max_chars: int = 4000,
+    min_chars: int = 0,
+) -> list[Symbol]:
+    return parse_file(source, language, rel_path, max_chars, min_chars)[0]
+
+
+def build_index(
+    repo: Path,
+    ignore_dirs: set[str],
+    ignore_globs: list[str],
+    max_chars: int,
+    min_chars: int,
+) -> list[FileRecord]:
+    records: list[FileRecord] = []
+    failures = 0
+    for path, language in iter_source_files(repo, ignore_dirs, ignore_globs):
+        rel_path = path.relative_to(repo).as_posix()
         try:
-            if not is_binary(file_path):
-                with open(file_path, 'r', encoding='utf-8') as file:
-                    file_contents[file_path] = file.read()
+            source = path.read_bytes()
+            symbols, imports = parse_file(
+                source, language, rel_path, max_chars, min_chars
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
+            failures += 1
+            logger.warning("Skipping %s: %s", rel_path, exc)
+            continue
+        if symbols:
+            records.append(
+                FileRecord(
+                    path=rel_path,
+                    name=path.name,
+                    language=language,
+                    depth=len(path.relative_to(repo).parts) - 1,
+                    symbols=symbols,
+                    imports=imports,
+                )
+            )
+    if failures:
+        logger.warning("%d file(s) could not be parsed", failures)
+    return records
 
-                    # Calculate the depth of the directory containing this file
-                    directory_depth = calculate_depth(root)
 
-                    # Calculate the depth rank based on the formula
-                    depth_rank = calculate_depth_rank(root)
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=Path("../Rocket.Chat"), help="Repository to index")
+    # Written into data/, which docker-compose mounts into the loader container.
+    parser.add_argument("--output", type=Path, default=Path("data/all_code_blocks.json"))
+    # 4000 chars x the retriever's k=4 keeps the RAG prompt inside the LLM context.
+    parser.add_argument("--max-chars", type=int, default=4000, help="Truncate symbols longer than this")
+    parser.add_argument("--min-chars", type=int, default=0, help="Skip symbols shorter than this")
+    parser.add_argument("--ignore-dir", action="append", default=[], help="Extra directory name to skip")
+    parser.add_argument("--ignore-glob", action="append", default=[], help="Extra path glob to skip")
+    parser.add_argument("--verbose", action="store_true")
+    return parser.parse_args(argv)
 
-                    # Add the depth information for this file
-                    depth_info[file_path] = {"depth": directory_depth, "rank": depth_rank}
 
-        except Exception as e:
-            error_files.append(file_path)
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
 
-# Define the path for the output JSON file
-output_json_path = "all_code_blocks.json"
+    repo = args.repo.resolve()
+    if not repo.is_dir():
+        logger.error("Repository not found: %s", repo)
+        return 1
 
-# Process file contents
-all_code_blocks = []
-total_keys = 0
+    records = build_index(
+        repo,
+        set(DEFAULT_IGNORE_DIRS) | set(args.ignore_dir),
+        DEFAULT_IGNORE_GLOBS + args.ignore_glob,
+        args.max_chars,
+        args.min_chars,
+    )
+    payload = {
+        "repo": repo.name,
+        "files": [asdict(record) for record in records],
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-for file_path, content in file_contents.items():
-    code_blocks = extract_code_from_content(content)
+    total_symbols = sum(len(record.symbols) for record in records)
+    logger.info(
+        "Wrote %d symbols from %d files to %s", total_symbols, len(records), args.output
+    )
+    return 0
 
-    # Ignore code blocks with keys that contain specific characters
-    code_blocks = {key: value for key, value in code_blocks.items() if all(char not in key for char in characters_to_ignore)}
-    
-    # Remove empty keys (code blocks with empty values) and keys with brackets
-    code_blocks = {key: value for key, value in code_blocks.items() if value.strip() and "[" not in key and "]" not in key}
 
-    if code_blocks:
-        depth_info_for_file = depth_info.get(file_path, {"depth": 0, "rank": 0})
-
-        # Append the code blocks to the list
-        all_code_blocks.append({
-            "file": os.path.basename(file_path),
-            "path": file_path,
-            "code": code_blocks,
-            "depth_rank": depth_info_for_file["rank"]
-        })
-
-        # Update the total keys
-        total_keys += len(code_blocks)
-
-# Write the collected code blocks to the output JSON file
-with open(output_json_path, 'w', encoding='utf-8') as output_json_file:
-    json.dump(all_code_blocks, output_json_file, indent=4)
-
-print("All code blocks are stored in the output JSON file:", output_json_path)
-print("Total number of keys:", total_keys)
+if __name__ == "__main__":
+    sys.exit(main())

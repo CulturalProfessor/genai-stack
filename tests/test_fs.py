@@ -1,0 +1,245 @@
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import fs
+
+TS_SOURCE = """\
+import { Accounts } from 'meteor/accounts-base';
+
+export interface CrowdUser {
+\tcrowd_username: string;
+}
+
+type Handler = (id: string) => Promise<void>;
+
+export class CrowdSync {
+\tprivate readonly url: string;
+
+\tconstructor(url: string) {
+\t\tthis.url = url;
+\t}
+
+\tasync syncDataToUser(crowdUser: Record<string, any>, id: string) {
+\t\tconst user = { username: crowdUser.username };
+\t\treturn user;
+\t}
+}
+
+export const setReaction = async (room: string) => {
+\tconst oldMessage = JSON.parse(room);
+\treturn oldMessage;
+};
+
+function cleanUsername(username: string) {
+\treturn username.trim();
+}
+"""
+
+
+def symbols_by_name(source: str = TS_SOURCE, path: str = "src/crowd.ts", **kwargs):
+    symbols = fs.extract_symbols(source.encode(), "typescript", path, **kwargs)
+    return {symbol.qualified_name: symbol for symbol in symbols}
+
+
+def test_extracts_every_declaration_kind():
+    found = symbols_by_name()
+    assert set(found) == {
+        "CrowdUser",
+        "Handler",
+        "CrowdSync",
+        "CrowdSync.constructor",
+        "CrowdSync.syncDataToUser",
+        "setReaction",
+        "cleanUsername",
+    }
+
+
+def test_kinds_are_labelled():
+    found = symbols_by_name()
+    assert found["CrowdUser"].kind == "interface"
+    assert found["Handler"].kind == "type_alias"
+    assert found["CrowdSync"].kind == "class"
+    assert found["CrowdSync.syncDataToUser"].kind == "method"
+    assert found["setReaction"].kind == "function"
+    assert found["cleanUsername"].kind == "function"
+
+
+def test_exported_declarations_are_not_skipped():
+    """The previous line-based extractor dropped any line containing `export`."""
+    found = symbols_by_name()
+    assert "setReaction" in found
+    assert "CrowdSync" in found
+
+
+def test_code_has_no_duplicated_lines():
+    """The old extractor appended each opening line twice."""
+    code = symbols_by_name()["CrowdSync.syncDataToUser"].code
+    lines = [line.strip() for line in code.splitlines() if line.strip()]
+    assert len(lines) == len(set(lines))
+
+
+def test_method_body_is_complete():
+    code = symbols_by_name()["CrowdSync.syncDataToUser"].code
+    assert code.startswith("async syncDataToUser(")
+    assert code.rstrip().endswith("}")
+    assert "return user;" in code
+
+
+def test_class_skeleton_lists_members_without_bodies():
+    code = symbols_by_name()["CrowdSync"].code
+    assert "class CrowdSync {" in code
+    assert "async syncDataToUser(crowdUser: Record<string, any>, id: string)" in code
+    # Member bodies belong to the method symbols, not to the class symbol.
+    assert "return user;" not in code
+
+
+def test_arrow_function_signature_stops_at_the_body():
+    found = symbols_by_name()
+    assert found["setReaction"].signature == "setReaction = async (room: string) =>"
+
+
+def test_line_numbers_point_at_the_declaration():
+    symbol = symbols_by_name()["cleanUsername"]
+    assert TS_SOURCE.splitlines()[symbol.start_line - 1].startswith("function cleanUsername")
+
+
+def test_ids_are_unique_and_carry_the_file_path():
+    symbols = fs.extract_symbols(TS_SOURCE.encode(), "typescript", "src/crowd.ts")
+    ids = [symbol.id for symbol in symbols]
+    assert len(ids) == len(set(ids))
+    assert all(symbol.id.startswith("src/crowd.ts:") for symbol in symbols)
+
+
+def test_same_name_in_two_files_yields_different_ids():
+    """Symbol names repeat across a codebase; ids must not collide."""
+    a = fs.extract_symbols(TS_SOURCE.encode(), "typescript", "a.ts")
+    b = fs.extract_symbols(TS_SOURCE.encode(), "typescript", "b.ts")
+    assert not {s.id for s in a} & {s.id for s in b}
+
+
+def test_truncation_is_flagged():
+    found = symbols_by_name(max_chars=40)
+    symbol = found["CrowdSync.syncDataToUser"]
+    assert symbol.truncated
+    assert symbol.code.endswith("// ... truncated")
+
+
+def test_min_chars_drops_trivial_symbols():
+    found = symbols_by_name(min_chars=10_000)
+    assert found == {}
+
+
+def test_javascript_and_tsx_are_supported():
+    js = fs.extract_symbols(b"export const go = () => { return 1; }", "javascript", "a.js")
+    tsx = fs.extract_symbols(
+        b"export const View = (p: Props) => { return <div />; }", "tsx", "a.tsx"
+    )
+    assert [s.name for s in js] == ["go"]
+    assert [s.name for s in tsx] == ["View"]
+
+
+def test_unparseable_source_does_not_raise():
+    symbols = fs.extract_symbols(b"function ( { { {", "typescript", "broken.ts")
+    assert isinstance(symbols, list)
+
+
+@pytest.fixture
+def repo(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "crowd.ts").write_text(TS_SOURCE)
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "dep.js").write_text("export const dep = () => 1;")
+    (tmp_path / "src" / "crowd.test.ts").write_text(TS_SOURCE)
+    (tmp_path / "src" / "readme.md").write_text("# not code")
+    return tmp_path
+
+
+def test_build_index_prunes_ignored_paths(repo):
+    records = fs.build_index(
+        repo, set(fs.DEFAULT_IGNORE_DIRS), fs.DEFAULT_IGNORE_GLOBS, 4000, 0
+    )
+    paths = [record.path for record in records]
+    assert paths == ["src/crowd.ts"]
+
+
+def test_main_writes_a_loadable_index(repo, tmp_path):
+    output = tmp_path / "out" / "index.json"
+    assert fs.main(["--repo", str(repo), "--output", str(output)]) == 0
+
+    index = json.loads(output.read_text())
+    assert index["files"][0]["language"] == "typescript"
+    assert index["files"][0]["depth"] == 1
+    assert any(s["name"] == "cleanUsername" for s in index["files"][0]["symbols"])
+
+
+def test_main_reports_a_missing_repo(tmp_path):
+    assert fs.main(["--repo", str(tmp_path / "nope")]) == 1
+
+
+GRAPH_SOURCE = """\
+import { cleanUsername } from './util/text';
+import { Accounts } from 'meteor/accounts-base';
+const legacy = require('../legacy/sync');
+
+export class CrowdSync {
+\tasync syncDataToUser(user: any, id: string) {
+\t\tconst username = cleanUsername(user.name);
+\t\tawait Accounts.setPasswordAsync(id, user.password);
+\t\treturn username;
+\t}
+}
+
+export const runSync = async (user: any) => {
+\tconst sync = new CrowdSync();
+\treturn sync.syncDataToUser(user, user.id);
+};
+"""
+
+
+def test_calls_are_collected_per_symbol():
+    found = symbols_by_name(GRAPH_SOURCE)
+    assert found["CrowdSync.syncDataToUser"].calls == [
+        "cleanUsername",
+        "setPasswordAsync",
+    ]
+
+
+def test_new_expressions_count_as_calls():
+    found = symbols_by_name(GRAPH_SOURCE)
+    assert "CrowdSync" in found["runSync"].calls
+
+
+def test_method_calls_use_the_property_name():
+    found = symbols_by_name(GRAPH_SOURCE)
+    assert "syncDataToUser" in found["runSync"].calls
+
+
+def test_class_skeleton_has_no_calls_of_its_own():
+    """Calls inside a body belong to that method, not to the class symbol."""
+    assert symbols_by_name(GRAPH_SOURCE)["CrowdSync"].calls == []
+
+
+def test_recursive_calls_do_not_self_link():
+    source = "function walk(n: any) { return walk(n.next); }"
+    assert symbols_by_name(source)["walk"].calls == []
+
+
+def test_imports_cover_import_and_require():
+    _, imports = fs.parse_file(GRAPH_SOURCE.encode(), "typescript", "src/crowd.ts")
+    assert imports == ["../legacy/sync", "./util/text", "meteor/accounts-base"]
+
+
+def test_build_index_records_imports(tmp_path):
+    (tmp_path / "a.ts").write_text("import { b } from './b';\nexport function a() { return b(); }")
+    (tmp_path / "b.ts").write_text("export function b() { return 1; }")
+    records = {
+        r.path: r
+        for r in fs.build_index(tmp_path, set(fs.DEFAULT_IGNORE_DIRS), [], 4000, 0)
+    }
+    assert records["a.ts"].imports == ["./b"]
+    assert records["b.ts"].imports == []
