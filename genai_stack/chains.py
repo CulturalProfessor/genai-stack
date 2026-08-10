@@ -4,10 +4,13 @@ from __future__ import annotations
 from typing import Any, List
 
 from langchain.chains import RetrievalQAWithSourcesChain
+from langchain.chains.base import Chain
 from langchain.chains.qa_with_sources import load_qa_with_sources_chain
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts.chat import (
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
+    MessagesPlaceholder,
     SystemMessagePromptTemplate,
 )
 
@@ -44,6 +47,35 @@ def extract_title_and_question(input_string):
     return title, question
 
 
+def as_messages(history: List[Any]) -> list:
+    """(question, answer) pairs as the alternating messages a chat model wants."""
+    messages = []
+    for question, answer in history or []:
+        messages.append(HumanMessage(content=question))
+        messages.append(AIMessage(content=answer))
+    return messages
+
+
+def format_history(history: List[Any]) -> str:
+    """The same pairs as plain text, for prompts that take a string."""
+    if not history:
+        return "(this is the first question of the conversation)"
+    return "\n".join(
+        f"Q: {question}\nA: {answer}" for question, answer in history
+    )
+
+
+def widen_question(question: str, history: List[Any], turns: int = 1) -> str:
+    """A retrieval query for a follow-up, carrying the previous question along.
+
+    Cheaper than asking the LLM to rewrite the question into a standalone one,
+    and enough for the pronoun case ("what calls it?") that otherwise retrieves
+    on a handful of stop words.
+    """
+    previous = [question for question, _ in (history or [])][-turns:]
+    return "\n".join([*previous, question])
+
+
 def configure_llm_only_chain(llm):
     # LLM only response
     template = """
@@ -54,19 +86,47 @@ def configure_llm_only_chain(llm):
     human_template = "{question}"
     human_message_prompt = HumanMessagePromptTemplate.from_template(human_template)
     chat_prompt = ChatPromptTemplate.from_messages(
-        [system_message_prompt, human_message_prompt]
+        [
+            system_message_prompt,
+            # Optional, so a caller passing its own prompt (generate_ticket) is
+            # unaffected and a first question needs no placeholder value.
+            MessagesPlaceholder("chat_history", optional=True),
+            human_message_prompt,
+        ]
     )
 
     def generate_llm_output(
-        user_input: str, callbacks: List[Any], prompt=chat_prompt
+        user_input: str,
+        callbacks: List[Any] = None,
+        prompt=chat_prompt,
+        chat_history: List[Any] = None,
     ) -> str:
         chain = prompt | llm
+        inputs = {"question": user_input}
+        if "chat_history" in set(prompt.input_variables) | set(prompt.optional_variables):
+            inputs["chat_history"] = as_messages(chat_history)
         answer = chain.invoke(
-            {"question": user_input}, config={"callbacks": callbacks}
+            inputs, config={"callbacks": callbacks or []}
         ).content
         return {"answer": answer}
 
     return generate_llm_output
+
+
+class ChatRetrievalQAWithSourcesChain(RetrievalQAWithSourcesChain):
+    """Retrieval QA that can search on something other than the raw question.
+
+    A follow-up like "and what calls it?" retrieves nothing on its own. The
+    caller passes `retrieval_question` - the question widened with what came
+    before it - while the LLM still answers the question actually asked.
+    """
+
+    def _get_docs(self, inputs: dict, *, run_manager) -> list:
+        question = inputs.get("retrieval_question") or inputs[self.question_key]
+        docs = self.retriever.invoke(
+            question, config={"callbacks": run_manager.get_child()}
+        )
+        return self._reduce_tokens_below_limit(docs)
 
 
 def configure_qa_rag_chain(llm, embeddings, embeddings_store_url, username, password):
@@ -90,6 +150,11 @@ def configure_qa_rag_chain(llm, embeddings, embeddings_store_url, username, pass
     the libraries involved, and quote the relevant lines when it helps.
     If the context does not contain the answer, say that you could not find it
     in the indexed code. Do not invent files, functions or behaviour.
+
+    Earlier turns of this conversation, so you can resolve what a follow-up
+    question refers to. Treat them as background, not as context to quote:
+    ----
+    {chat_history}
     ----
     {summaries}
     ----
@@ -112,13 +177,35 @@ def configure_qa_rag_chain(llm, embeddings, embeddings_store_url, username, pass
 
     kg = build_vector_store(embeddings, embeddings_store_url, username, password)
 
-    kg_qa = RetrievalQAWithSourcesChain(
+    kg_qa = ChatRetrievalQAWithSourcesChain(
         combine_documents_chain=qa_chain,
         retriever=kg.as_retriever(search_kwargs={"k": RETRIEVER_K}),
         reduce_k_below_max_tokens=False,
         max_tokens_limit=10075,
     )
     return kg_qa
+
+
+def answer_question(chain, question: str, history: List[Any] = None, callbacks=None) -> str:
+    """Ask either chain the same way, and give both the conversation so far.
+
+    The two have different shapes - the LLM-only chain is a plain function, the
+    RAG chain is a langchain Chain - which every caller used to paper over by
+    passing an inputs dict to both. The function took that dict as the question
+    itself and stringified it into the prompt.
+    """
+    history = history or []
+    callbacks = callbacks or []
+    if isinstance(chain, Chain):
+        return chain(
+            {
+                "question": question,
+                "chat_history": format_history(history),
+                "retrieval_question": widen_question(question, history),
+            },
+            callbacks=callbacks,
+        )["answer"]
+    return chain(question, callbacks=callbacks, chat_history=history)["answer"]
 
 
 def generate_ticket(neo4j_graph, llm_chain, input_question):

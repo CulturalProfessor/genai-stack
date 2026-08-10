@@ -18,6 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from genai_stack.chains import (
+    answer_question,
     configure_llm_only_chain,
     configure_qa_rag_chain,
     generate_ticket,
@@ -172,9 +173,8 @@ def qstream(question: Question = Depends()):
     q = Queue()
 
     def cb():
-        output_function(
-            {"question": question.text, "chat_history": []},
-            callbacks=[QueueCallback(q)],
+        answer_question(
+            output_function, question.text, callbacks=[QueueCallback(q)]
         )
 
     def generate():
@@ -191,12 +191,9 @@ def qstream(question: Question = Depends()):
 
 @app.post("/query", dependencies=guarded)
 async def ask(question: Question):
-    output_function = _chain_for(question.rag)
-    result = output_function(
-        {"question": question.text, "chat_history": []}, callbacks=[]
-    )
+    answer = answer_question(_chain_for(question.rag), question.text)
 
-    return {"result": result["answer"], "model": llm_name}
+    return {"result": answer, "model": llm_name}
 
 
 @app.post("/generate-ticket", dependencies=guarded)
