@@ -103,3 +103,8 @@ def apply_schema(driver, dimension: int) -> None:
     create_constraints(driver)
     create_vector_index(driver, dimension)
     create_fulltext_index(driver)
+    # Imported here rather than at module scope: conversations imports nothing
+    # from this module, and keeping the direction one-way avoids a cycle.
+    from genai_stack.conversations import create_constraints as conversation_constraints
+
+    conversation_constraints(driver)
