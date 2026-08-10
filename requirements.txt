@@ -17,9 +17,13 @@ boto3==1.40.30          # required by the Bedrock LLM/embedding options
 python-dotenv==1.2.2
 pydantic==2.13.4
 
-# Embedding model for EMBEDDING_MODEL=sentence_transformer
+# Embedding model for EMBEDDING_MODEL=sentence_transformer.
+# CPU-only torch: the default PyPI wheel is 767MB and drags in ~2GB of nvidia-*
+# CUDA packages that nothing here uses. The +cpu build is 179MB with no CUDA
+# dependencies. Drop the extra index and the +cpu suffix if you want GPU builds.
+--extra-index-url https://download.pytorch.org/whl/cpu
 sentence-transformers==3.4.1
-torch==2.6.0
+torch==2.6.0+cpu
 
 # Code extraction (fs.py)
 tree-sitter==0.25.2
