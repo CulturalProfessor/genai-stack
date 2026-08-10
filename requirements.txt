@@ -31,7 +31,6 @@ tree-sitter-typescript==0.23.2
 tree-sitter-javascript==0.25.0
 
 # Apps
-streamlit==1.50.0
 fastapi==0.141.1
 uvicorn==0.38.0
 sse-starlette==3.4.8

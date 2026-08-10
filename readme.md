@@ -13,8 +13,8 @@ so the model sees the code you asked about **plus the code around it**.
 
 ```mermaid
 flowchart LR
-    url(["repo URL"]) --> ui["UI :8501<br/>clone + parse + embed"]
-    ui --> neo4j[("Neo4j :7474<br/>code graph")]
+    url(["repo URL"]) --> api["API :8504<br/>clone + parse + embed"]
+    api --> neo4j[("Neo4j :7474<br/>code graph")]
     q(["question"]) --> chain["GraphRAG chain"]
     chain <-->|hybrid search<br/>+ graph traversal| neo4j
     chain --> llm["LLM"]
@@ -83,7 +83,7 @@ hostname `llm` does not resolve on any run where you forget the flag. Or set
 `LLM=gpt-3.5` plus an `OPENAI_API_KEY` and nothing is downloaded. Without
 either, indexing still works and questions report a clear error.
 
-**3.** Open **http://localhost:8501**, paste a repository URL on *Index a
+**3.** Open **http://localhost:5173**, paste a repository URL on *Index a
 repository*, and press the button. Then ask questions on *Ask the codebase*.
 
 The importer is idempotent — re-indexing updates nodes in place.
@@ -92,10 +92,10 @@ The importer is idempotent — re-indexing updates nodes in place.
 
 ## Conversations
 
-Chats are saved in Neo4j, not in the browser session, so they survive a refresh
-and a `docker compose down`. Both chat pages work the same way: **New chat** in
-the sidebar starts one, the list switches between them, and each can be renamed
-or deleted. A chat is titled after its first question.
+Chats are saved in Neo4j, not in the browser, so they survive a refresh and a
+`docker compose down`. Both chats work the same way: **New chat** in the sidebar
+starts one, the list switches between them, and each can be renamed or deleted.
+A chat is titled after its first question.
 
 ```
 (:Conversation {id, kind, title, subject})-[:HAS_MESSAGE]->(:Message {role, content, position})
@@ -120,18 +120,13 @@ set of conversations.
 | URL | Service | What it is |
 |---|---|---|
 | **http://localhost:5173** | `web` | The app, in React: ask the codebase, chat with a PDF, index a repository. |
-| http://localhost:8501 | `ui` | The older Streamlit app. Same three jobs, same store — kept while the React client settles. |
 | http://localhost:7474 | `database` | Neo4j browser — inspect the graph directly. neo4j / password. |
-| http://localhost:8504 | `api` | HTTP API over the same chains, conversations, PDFs and indexing. |
+| http://localhost:8504 | `api` | HTTP API over the chains, conversations, PDFs and indexing. The client uses nothing else. |
 
-Both clients read and write the same Neo4j, so a chat started in one shows up
-in the other.
-
-Two optional extras, off by default:
+One optional extra, off by default:
 
 ```bash
 docker compose --profile linux up      # + Ollama at :11434
-docker compose --profile frontend up   # + the older Svelte client at :8505
 ```
 
 ## Where is what
@@ -139,7 +134,7 @@ docker compose --profile frontend up   # + the older Svelte client at :8505
 ```
 Dockerfile              one image, shared by every Python service
 web.Dockerfile          node image for the React dev server
-docker-compose.yml      five services by default: web, ui, api, database, pull-model
+docker-compose.yml      four services by default: web, api, database, pull-model
 
 genai_stack/            the library — no UI, no app code
   settings.py           environment configuration, read once
@@ -154,22 +149,14 @@ genai_stack/            the library — no UI, no app code
   pdf_store.py          uploaded PDFs and their chunks
   sources.py            validating and cloning repository URLs
 
-apps/                   thin entry points over the library
-  ui.py                 the Streamlit app (page router)
-  resources.py          cached model/database handles, shared by all pages
-  chrome.py             the sidebar status shared by every page
-  conversation_ui.py    the conversation list, shared by both chat pages
-  page_index.py         "Index a repository"
-  page_chat.py          "Ask the codebase"
-  page_pdf.py           "Chat with a PDF"
-  api.py                the FastAPI service
+apps/
+  api.py                the FastAPI service - the only backend entry point
 
 web/                    the React client (Vite, Tailwind, shadcn primitives)
   src/lib/api.ts        the typed API client, including the SSE streams
   src/hooks/useChat.ts  conversations, messages and streaming, shared by both chats
   src/views/            ChatView, PdfView, IndexView
   src/components/       NavRail, Sidebar, Transcript, Composer
-front-end/              the older Svelte client for the API
 tests/                  tests over the index pipeline
 index/                  generated code indexes (gitignored)
 data/                   Neo4j's database volume (gitignored)
@@ -189,11 +176,10 @@ Everything is optional except the model choice. Full list in `env.example`.
 | `NEO4J_URI` / `_USERNAME` / `_PASSWORD` | `neo4j://database:7687` / `neo4j` / `password` | |
 | `OPENAI_API_KEY` | | Only for `gpt-*` or `EMBEDDING_MODEL=openai` |
 | `AWS_*`, `BEDROCK_MODEL_ID` | `anthropic.claude-sonnet-5` | Only for `LLM=claude` or `EMBEDDING_MODEL=aws` |
-| `CODE_INDEX_PATH` | `index/all_code_blocks.json` | Where the UI reads and writes indexes |
 | `IMPORT_BATCH_SIZE` | `100` | Symbols embedded and written per batch |
-| `ALLOWED_GIT_HOSTS` | `github.com,gitlab.com,bitbucket.org` | Hosts the UI may clone from |
+| `ALLOWED_GIT_HOSTS` | `github.com,gitlab.com,bitbucket.org` | Hosts the API may clone from |
 | `API_KEY` | *(empty = no auth)* | When set, required as `X-API-Key` |
-| `ALLOWED_ORIGINS` | `http://localhost:8505,...` | CORS allowlist for the API |
+| `ALLOWED_ORIGINS` | `http://localhost:5173` | CORS allowlist for the API |
 | `RATE_LIMIT_REQUESTS` / `_WINDOW_SECONDS` | `30` / `60` | Per client IP; `0` disables |
 
 ### Choosing a model
@@ -236,7 +222,8 @@ With `API_KEY` set, send `-H "X-API-Key: …"` (or `&api_key=…` on the stream)
 
 ## Indexing from the command line
 
-The UI and the CLI share one code path:
+The app and the CLI share one code path. The CLI only writes JSON — nothing
+reaches Neo4j until you import it:
 
 ```bash
 python3 -m genai_stack.extract --github-url sindresorhus/ky
@@ -254,8 +241,17 @@ pip install tree-sitter tree-sitter-typescript tree-sitter-javascript
 
 Flags: `--branch`, `--ignore-dir` / `--ignore-glob`, `--max-chars` (where long
 symbols are truncated; the 4000 default fits the retriever's `k=4` inside the
-model context), `--min-chars`. Output lands in `index/`, which is mounted into
-the UI container, so the *From an index file* tab can import it.
+model context), `--min-chars`. Output lands in `index/`.
+
+Import the result with **Import an index file** on *Index a repository*, or:
+
+```bash
+curl -X POST http://localhost:8504/graph/import \
+  -F file=@index/all_code_blocks.json
+```
+
+This is the route for a **local checkout** — indexing from the app clones over
+`https://` and cannot see a directory on your disk.
 
 > Repositories are **cloned and parsed, never executed** — no install or build
 > step runs. Public repos over `https://` only, restricted to

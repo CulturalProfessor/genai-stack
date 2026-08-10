@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -16,7 +15,6 @@ class Settings:
     ollama_base_url: str | None
     embedding_model: str | None
     llm: str | None
-    code_index_path: Path
     import_batch_size: int
     api_key: str
     allowed_origins: list[str] = field(default_factory=list)
@@ -49,14 +47,11 @@ def load_settings() -> Settings:
         ollama_base_url=os.getenv("OLLAMA_BASE_URL"),
         embedding_model=os.getenv("EMBEDDING_MODEL"),
         llm=os.getenv("LLM"),
-        code_index_path=Path(
-            os.getenv("CODE_INDEX_PATH", "index/all_code_blocks.json")
-        ),
         import_batch_size=int(os.getenv("IMPORT_BATCH_SIZE", "100")),
         # Empty means no auth, which is the local-development default.
         api_key=os.getenv("API_KEY", ""),
         allowed_origins=_split(
-            os.getenv("ALLOWED_ORIGINS", "http://localhost:8505,http://localhost:5173")
+            os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
         ),
         rate_limit_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "30")),
         rate_limit_window_seconds=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")),

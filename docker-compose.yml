@@ -39,50 +39,6 @@ services:
     networks:
       - net
 
-  ui:
-    image: genai-stack/app:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: ["streamlit", "run", "apps/ui.py", "--server.port=8501", "--server.address=0.0.0.0"]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
-    volumes:
-      - $PWD/embedding_model:/embedding_model
-      # Holds the index from `python3 -m genai_stack.extract`. Mounted as a
-      # directory so a missing file does not make Docker create one in its
-      # place, and kept out of ./data, which is Neo4j's database volume.
-      - $PWD/index:/app/index
-    environment:
-      - NEO4J_URI=${NEO4J_URI-neo4j://database:7687}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD-password}
-      - NEO4J_USERNAME=${NEO4J_USERNAME-neo4j}
-      - OPENAI_API_KEY=${OPENAI_API_KEY-}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://host.docker.internal:11434}
-      - LLM=${LLM-qwen2.5-coder:1.5b}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL-sentence_transformer}
-      - CODE_INDEX_PATH=${CODE_INDEX_PATH-index/all_code_blocks.json}
-      - IMPORT_BATCH_SIZE=${IMPORT_BATCH_SIZE-100}
-      - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT-"https://api.smith.langchain.com"}
-      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2-false}
-      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT}
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-    networks:
-      - net
-    depends_on:
-      # Indexing needs no LLM, so the UI does not wait on the model pull.
-      database:
-        condition: service_healthy
-    ports:
-      - 8501:8501
-
   api:
     image: genai-stack/app:latest
     build:
@@ -99,7 +55,7 @@ services:
       - $PWD/embedding_model:/embedding_model
     environment:
       - API_KEY=${API_KEY-}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS-http://localhost:8505,http://localhost:5173}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS-http://localhost:5173}
       - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS-30}
       - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS-60}
       - NEO4J_URI=${NEO4J_URI-neo4j://database:7687}
@@ -109,6 +65,7 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL-http://host.docker.internal:11434}
       - LLM=${LLM-qwen2.5-coder:1.5b}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL-sentence_transformer}
+      - IMPORT_BATCH_SIZE=${IMPORT_BATCH_SIZE-100}
       - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT-"https://api.smith.langchain.com"}
       - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2-false}
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT}
@@ -128,10 +85,7 @@ services:
         - action: rebuild
           path: .
           ignore:
-            - apps/loader.py
-            - apps/bot.py
-            - apps/pdf_bot.py
-            - front-end/
+            - web/
     ports:
       - 8504:8504
 
@@ -157,32 +111,6 @@ services:
       - net
     ports:
       - 5173:5173
-
-  front-end:
-    # The older Svelte client, kept until the React one covers everything.
-    # `docker compose --profile frontend up` to run it.
-    profiles: ["frontend"]
-    build:
-      dockerfile: front-end.Dockerfile
-    environment:
-      - VITE_API_BASE_URL=${VITE_API_BASE_URL-http://localhost:8504}
-      - VITE_API_KEY=${API_KEY-}
-    x-develop:
-      watch:
-        - action: sync
-          path: ./front-end
-          target: /app
-          ignore:
-            - ./front-end/node_modules/
-        - action: rebuild
-          path: ./front-end/package.json
-    depends_on:
-      api:
-        condition: service_healthy
-    networks:
-      - net
-    ports:
-      - 8505:8505
 
 volumes:
   ollama_models:

@@ -1,6 +1,6 @@
 """Reading and reshaping the code index produced by fs.py.
 
-Kept free of Neo4j, Streamlit and LangChain imports so the shape of the data
+Kept free of Neo4j and LangChain imports so the shape of the data
 can be tested without the runtime stack installed.
 """
 from __future__ import annotations

@@ -241,8 +241,8 @@ async def ask(question: Question):
 # --------------------------------------------------------------------------
 # Conversations
 #
-# The same store the Streamlit app uses, so a chat started in one shows up in
-# the other. Everything here is a thin wrapper over genai_stack.conversations.
+# Everything here is a thin wrapper over genai_stack.conversations, which owns
+# the Cypher; this layer only turns it into JSON.
 # --------------------------------------------------------------------------
 
 

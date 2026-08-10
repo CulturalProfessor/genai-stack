@@ -25,6 +25,3 @@ RUN pip install -r requirements.txt
 
 COPY genai_stack ./genai_stack
 COPY apps ./apps
-# Theme options for the Streamlit app. Read from the working directory, which
-# is why this sits at /app rather than in a home directory.
-COPY .streamlit ./.streamlit
