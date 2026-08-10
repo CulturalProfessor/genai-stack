@@ -175,7 +175,7 @@ export function PdfView() {
           <Composer
             onSend={(text) => chat.send(text)}
             onStop={chat.stopStreaming}
-            busy={chat.streaming !== null}
+            busy={chat.busy}
             placeholder={`Ask about ${document_.name}`}
             hint="Answers come from the selected document only."
           />

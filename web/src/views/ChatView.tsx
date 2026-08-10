@@ -68,7 +68,7 @@ export function ChatView({ model }: { model: string | null }) {
         <Composer
           onSend={(text) => chat.send(text, mode === "Graph RAG")}
           onStop={chat.stopStreaming}
-          busy={chat.streaming !== null}
+          busy={chat.busy}
           mode={mode}
           onModeChange={setMode}
         />
