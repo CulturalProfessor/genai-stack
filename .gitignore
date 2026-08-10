@@ -1,6 +1,12 @@
 .env
-data/
+# Tracked as an empty directory so the compose bind mount does not create it
+# as root, which would stop fs.py from writing the index into it.
+data/*
+!data/.gitkeep
 embedding_model/*
 !embedding_model/.ignore
 .DS_Store
 all_code_blocks.json
+__pycache__/
+*.pyc
+.pytest_cache/
