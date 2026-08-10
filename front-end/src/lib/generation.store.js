@@ -1,6 +1,7 @@
 import { writable } from "svelte/store";
+import { API_BASE_URL, apiHeaders } from "./api";
 
-const API_ENDPOINT = "http://localhost:8504/generate-ticket";
+const API_ENDPOINT = `${API_BASE_URL}/generate-ticket`;
 
 export const generationStates = {
     IDLE: "idle",
@@ -17,9 +18,14 @@ function createGenerationStore() {
         generate: async (fromQuestion) => {
             update(() => ({ state: generationStates.LOADING, data: { title: "", text: "" } }));
             try {
-                const response = await fetch(`${API_ENDPOINT}?text=${encodeURI(fromQuestion)}`, {
-                    method: "GET",
+                const response = await fetch(API_ENDPOINT, {
+                    method: "POST",
+                    headers: apiHeaders(),
+                    body: JSON.stringify({ text: fromQuestion }),
                 });
+                if (!response.ok) {
+                    throw new Error(`Request failed with status ${response.status}`);
+                }
                 const generation = await response.json();
                 update(() => ({ state: generationStates.SUCCESS, data: generation.result }));
             } catch (e) {

@@ -1,6 +1,7 @@
 import { writable } from "svelte/store";
+import { API_BASE_URL, API_KEY } from "./api";
 
-const API_ENDPOINT = "http://localhost:8504/query-stream";
+const API_ENDPOINT = `${API_BASE_URL}/query-stream`;
 
 export const chatStates = {
     IDLE: "idle",
@@ -46,13 +47,23 @@ function createChatStore() {
         addMessage("me", question, ragMode);
         const messageId = addMessage("bot", "", ragMode);
         try {
-            const evt = new EventSource(`${API_ENDPOINT}?text=${encodeURI(question)}&rag=${ragMode}`);
+            // encodeURIComponent, not encodeURI: a question containing & or #
+            // would otherwise be truncated or split into extra parameters.
+            const params = new URLSearchParams({ text: question, rag: ragMode });
+            if (API_KEY) {
+                params.set("api_key", API_KEY);
+            }
+            const evt = new EventSource(`${API_ENDPOINT}?${params}`);
             question = "";
             evt.onmessage = (e) => {
                 if (e.data) {
                     const data = JSON.parse(e.data);
                     if (data.init) {
                         updateMessage(messageId, "", data.model);
+                        return;
+                    }
+                    if (data.error) {
+                        updateMessage(messageId, `\n\nError: ${data.error}`);
                         return;
                     }
                     updateMessage(messageId, data.token);
