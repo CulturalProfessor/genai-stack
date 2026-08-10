@@ -11,9 +11,11 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONIOENCODING=UTF-8
 
+# git: the loader clones the repository you point it at.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
