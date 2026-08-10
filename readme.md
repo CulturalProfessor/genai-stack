@@ -4,6 +4,79 @@ own GenAI application in no time.
 The demo applications can serve as inspiration or as a starting point.
 Learn more about the details in the [technical blog post](https://neo4j.com/developer-blog/genai-app-how-to-build/).
 
+# How it works
+
+A TS/JS repository is parsed into a code knowledge graph, and questions are
+answered by searching that graph and then **walking its relationships** to pull
+in code the question never matched directly.
+
+```mermaid
+flowchart LR
+    repo[("TS/JS repo")] -->|tree-sitter| extract["genai_stack.extract<br/>symbols + calls + imports"]
+    extract -->|index/all_code_blocks.json| loader["loader app<br/>embed + write"]
+    loader --> neo4j[("Neo4j<br/>code graph")]
+    q(["question"]) --> chain["GraphRAG chain"]
+    chain <-->|hybrid search<br/>+ graph traversal| neo4j
+    chain --> llm["LLM"]
+    llm --> ans(["answer + sources"])
+```
+
+## The graph
+
+Each symbol is its own node, keyed by `path:line:qualified_name`, so a name that
+repeats across the repo never collapses into one shared node.
+
+```mermaid
+graph LR
+    F1["File<br/><small>crowd.ts</small>"] -->|CONTAINS| C1["Code<br/><small>CrowdSync.syncDataToUser</small>"]
+    F1 -->|CONTAINS| C2["Code<br/><small>runSync</small>"]
+    F2["File<br/><small>util/text.ts</small>"] -->|CONTAINS| C3["Code<br/><small>cleanUsername</small>"]
+    F1 -->|IMPORTS| F2
+    C2 -->|CALLS| C1
+    C1 -->|CALLS| C3
+```
+
+`Code` nodes carry the symbol's source text plus its embedding, indexed by a
+vector index and a full-text index.
+
+## Retrieval
+
+Vector search alone answers "which symbol looks like the question". The graph
+answers "and what else do I need to understand it".
+
+```mermaid
+flowchart TD
+    Q(["how are usernames cleaned?"]) --> H{"hybrid search<br/>vector + full-text"}
+    H -->|top k = 4| HIT["matched Code node"]
+    HIT -->|CALLS →| CALLEE["callees: what it uses"]
+    HIT -->|← CALLS| CALLER["callers: where it's used from"]
+    HIT -->|CONTAINS / IMPORTS| FILE["file + its dependencies"]
+    CALLEE --> CTX["context block:<br/>source + // Calls / // Called by"]
+    CALLER --> CTX
+    FILE --> CTX
+    CTX --> LLM["LLM answers, citing file paths"]
+```
+
+Full-text sits alongside vectors because code questions often name a symbol
+exactly, which lexical matching handles better than embeddings.
+
+## Layout
+
+```
+genai_stack/         the library - no app code
+  settings.py        environment configuration, read once
+  extract.py         tree-sitter parsing of a repo into symbols and edges
+  code_index.py      reshaping that index, resolving imports to files
+  schema.py          Neo4j labels, constraints and indexes
+  ingest.py          writing nodes and relationships into Neo4j
+  retrieval.py       the graph traversal query and the vector store
+  llm.py             loading chat and embedding models
+  chains.py          the LLM-only and GraphRAG chains
+apps/                thin entry points: api, bot, loader, pdf_bot
+front-end/           Svelte client for the API
+tests/               unit tests for the index pipeline
+```
+
 # Configure
 
 Create a `.env` file from the environment template file `env.example`
@@ -15,22 +88,23 @@ Available variables:
 | NEO4J_URI              | neo4j://database:7687              | REQUIRED - URL to Neo4j database                                        |
 | NEO4J_USERNAME         | neo4j                              | REQUIRED - Username for Neo4j database                                  |
 | NEO4J_PASSWORD         | password                           | REQUIRED - Password for Neo4j database                                  |
-| LLM                    | llama2                             | REQUIRED - Can be any Ollama model tag, or gpt-4 or gpt-3.5 or claudev2 |
+| LLM                    | llama2                             | REQUIRED - Any Ollama model tag, or gpt-4, gpt-3.5, or claude (Bedrock) |
 | EMBEDDING_MODEL        | sentence_transformer               | REQUIRED - Can be sentence_transformer, openai, aws or ollama           |
-| AWS_ACCESS_KEY_ID      |                                    | REQUIRED - Only if LLM=claudev2 or embedding_model=aws                  |
-| AWS_SECRET_ACCESS_KEY  |                                    | REQUIRED - Only if LLM=claudev2 or embedding_model=aws                  |
-| AWS_DEFAULT_REGION     |                                    | REQUIRED - Only if LLM=claudev2 or embedding_model=aws                  |
+| AWS_ACCESS_KEY_ID      |                                    | REQUIRED - Only if LLM=claude or embedding_model=aws                    |
+| AWS_SECRET_ACCESS_KEY  |                                    | REQUIRED - Only if LLM=claude or embedding_model=aws                    |
+| AWS_DEFAULT_REGION     |                                    | REQUIRED - Only if LLM=claude or embedding_model=aws                    |
 | OPENAI_API_KEY         |                                    | REQUIRED - Only if LLM=gpt-4 or LLM=gpt-3.5 or embedding_model=openai   |
 | LANGCHAIN_ENDPOINT     | "https://api.smith.langchain.com"  | OPTIONAL - URL to Langchain Smith API                                   |
 | LANGCHAIN_TRACING_V2   | false                              | OPTIONAL - Enable Langchain tracing v2                                  |
 | LANGCHAIN_PROJECT      |                                    | OPTIONAL - Langchain project name                                       |
 | LANGCHAIN_API_KEY      |                                    | OPTIONAL - Langchain API key                                            |
-| CODE_INDEX_PATH        | data/all_code_blocks.json          | OPTIONAL - Index file the loader reads                                  |
+| CODE_INDEX_PATH        | index/all_code_blocks.json          | OPTIONAL - Index file the loader reads                                  |
 | IMPORT_BATCH_SIZE      | 100                                | OPTIONAL - Symbols embedded and written per batch                       |
 | API_KEY                |                                    | OPTIONAL - When set, the API requires it in the X-API-Key header        |
 | ALLOWED_ORIGINS        | http://localhost:8505,...          | OPTIONAL - Comma separated CORS allowlist for the API                   |
 | RATE_LIMIT_REQUESTS    | 30                                 | OPTIONAL - Requests per IP per window (0 disables)                      |
 | RATE_LIMIT_WINDOW_SECONDS | 60                              | OPTIONAL - Rate limit window                                            |
+| BEDROCK_MODEL_ID       | anthropic.claude-sonnet-5          | OPTIONAL - Bedrock model id used when LLM=claude                        |
 
 ## LLM Configuration
 MacOS and Linux users can use any LLM that's available via Ollama. Check the "tags" section under the model page you want to use on https://ollama.ai/library and write the tag for the value of the environment variable `LLM=` in th e`.env` file.
@@ -53,16 +127,17 @@ Not supported by Ollama, so Windows users need to generate a OpenAI API key and 
 
 **1. Index a codebase**
 
-`fs.py` parses a TS/JS repository with tree-sitter and writes one JSON record
-per file, listing the functions, methods, classes and types it defines. It runs
-on the host and needs the tree-sitter packages from `requirements.txt`:
+`genai_stack.extract` parses a TS/JS repository with tree-sitter and writes one
+JSON record per file: the functions, methods, classes and types it defines, the
+names each of them calls, and the modules the file imports. It runs on the host
+and needs only the tree-sitter packages:
 
 ```bash
 pip install tree-sitter tree-sitter-typescript tree-sitter-javascript
 ```
 
 ```bash
-python3 fs.py --repo ../Rocket.Chat --output data/all_code_blocks.json
+python3 -m genai_stack.extract --repo ../Rocket.Chat
 ```
 
 Useful flags: `--ignore-dir` / `--ignore-glob` to skip paths, `--max-chars` to
@@ -70,7 +145,7 @@ change where long symbols are truncated (the default of 4000 is chosen to fit
 the retriever's `k=4` inside the model context), `--min-chars` to drop trivial
 one-liners.
 
-The `data/` directory is mounted into the loader container, so re-indexing a
+The `index/` directory is mounted into the loader container, so re-indexing a
 repository never requires a rebuild.
 
 **2. Set the model**
@@ -106,16 +181,22 @@ completely to start up again.
 docker compose down
 ```
 
+**Run the tests**
+
+```bash
+pip install -r requirements-dev.txt && python3 -m pytest tests/
+```
+
 # Applications
 
 Here's what's in this repo:
 
 | Name | Main files | Compose name | URLs | Description |
 |---|---|---|---|---|
-| Support Bot | `bot.py` | `bot` | http://localhost:8501 | Main usecase. Fullstack Python application. |
-| Code Loader | `fs.py`, `loader.py` | `loader` | http://localhost:8502 | Extract code symbols from a repo (`fs.py`) and load them into the database with vector embeddings (`loader.py`). |
-| PDF Reader | `pdf_bot.py` | `pdf_bot` | http://localhost:8503 | Read local PDF and ask it questions. Fullstack Python application. |
-| Standalone Bot API | `api.py` | `api` | http://localhost:8504 | Standalone HTTP API streaming (SSE) + non-streaming endpoints. Python. |
+| Support Bot | `apps/bot.py` | `bot` | http://localhost:8501 | Main usecase. Fullstack Python application. |
+| Code Loader | `genai_stack/extract.py`, `apps/loader.py` | `loader` | http://localhost:8502 | Extract code symbols and relationships from a repo, then load them into the graph with embeddings. |
+| PDF Reader | `apps/pdf_bot.py` | `pdf_bot` | http://localhost:8503 | Read local PDF and ask it questions. Fullstack Python application. |
+| Standalone Bot API | `apps/api.py` | `api` | http://localhost:8504 | Standalone HTTP API streaming (SSE) + non-streaming endpoints. Python. |
 | Standalone Bot UI | `front-end/` | `front-end` | http://localhost:8505 | Standalone client that uses the Standalone Bot API to interact with the model. JavaScript (Svelte) front-end. |
 
 The database can be explored at http://localhost:7474.
@@ -147,8 +228,8 @@ DB client: http://localhost:7474
 UI: http://localhost:8502
 DB client: http://localhost:7474
 
-- import the code index produced by `fs.py` into a knowledge graph of
-  `(:File)-[:CONTAINS]->(:Code)` nodes
+- import the code index into the `(:File)-[:CONTAINS]->(:Code)` graph and
+  build its `CALLS` and `IMPORTS` relationships
 - embed each symbol and store the vector on the `Code` node, backed by a vector
   index and a full-text index for hybrid search
 - UI: pick or upload an index, run the import, watch progress, clear the graph
