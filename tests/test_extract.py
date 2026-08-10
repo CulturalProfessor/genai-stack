@@ -243,3 +243,62 @@ def test_build_index_records_imports(tmp_path):
     }
     assert records["a.ts"].imports == ["./b"]
     assert records["b.ts"].imports == []
+
+
+TYPE_SOURCE = """\
+export interface RetryOptions {
+\t/**
+\t * The number of times to retry failed requests.
+\t * Long explanation that dominates the embedding.
+\t */
+\tlimit?: number;
+\t/** Methods to retry. */
+\tmethods?: string[];
+}
+
+export type Handler = (id: string) => Promise<void>;
+
+export enum Color {
+\tRed = 1,
+\tBlue = 2,
+}
+"""
+
+
+def test_interface_keeps_members_and_drops_doc_comments():
+    code = symbols_by_name(TYPE_SOURCE)["RetryOptions"].code
+    assert code.startswith("interface RetryOptions {")
+    # The trailing `;` is a separate token, not part of the member node.
+    assert "limit?: number" in code
+    assert "methods?: string[]" in code
+    # The JSDoc is what was drowning out implementation code in search.
+    assert "dominates the embedding" not in code
+    assert "Methods to retry" not in code
+
+
+def test_enum_keeps_its_members():
+    code = symbols_by_name(TYPE_SOURCE)["Color"].code
+    assert code.startswith("enum Color {")
+    assert "Red = 1" in code and "Blue = 2" in code
+
+
+def test_short_type_alias_is_kept_whole():
+    code = symbols_by_name(TYPE_SOURCE)["Handler"].code
+    assert code == "type Handler = (id: string) => Promise<void>;"
+
+
+def test_object_type_alias_becomes_a_skeleton():
+    source = "type Shape = {\n\t/** docs */\n\ta: number;\n\tb: string;\n};"
+    code = symbols_by_name(source)["Shape"].code
+    assert code.startswith("type Shape = {")
+    assert "a: number" in code and "docs" not in code
+
+
+def test_type_skeleton_caps_very_long_member_lists():
+    members = "\n".join(f"\tf{i}: number;" for i in range(60))
+    code = symbols_by_name(f"interface Big {{\n{members}\n}}")["Big"].code
+    assert "20 more members" in code  # 60 members, capped at 40
+
+
+def test_types_have_no_call_edges():
+    assert symbols_by_name(TYPE_SOURCE)["RetryOptions"].calls == []

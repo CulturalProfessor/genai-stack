@@ -78,6 +78,8 @@ MEMBER_NODES = {
 }
 FUNCTION_VALUE_NODES = {"arrow_function", "function", "function_expression"}
 CALL_NODES = {"call_expression", "new_expression"}
+# Bodies that can be reduced to a member list.
+TYPE_BODY_NODES = {"interface_body", "object_type", "enum_body"}
 
 _PARSERS: dict[str, Parser] = {}
 
@@ -170,6 +172,31 @@ def signature_of(node: Node, source: bytes) -> str:
     end = body.start_byte if body is not None else node.end_byte
     text = source[node.start_byte : end].decode("utf-8", errors="replace")
     return " ".join(text.split()).rstrip("{").strip()
+
+
+def type_skeleton(node: Node, source: bytes, max_members: int = 40) -> str:
+    """An interface/type/enum reduced to its members, without the doc comments.
+
+    Type declarations are often mostly JSDoc explaining behaviour. Embedded
+    whole, they out-score the code that implements that behaviour on exactly
+    the questions users ask - and a type node has no CALLS edges, so a hit on
+    one contributes nothing for the graph to traverse.
+    """
+    body = node.child_by_field_name("body") or node.child_by_field_name("value")
+    if body is None or body.type not in TYPE_BODY_NODES:
+        # Unions, function types and other short forms: keep them whole,
+        # collapsed onto one line.
+        return " ".join(node_text(node, source).split())
+
+    header = source[node.start_byte : body.start_byte].decode("utf-8", errors="replace")
+    lines = [" ".join(header.split()) + " {"]
+    members = [m for m in body.named_children if m.type != "comment"]
+    for member in members[:max_members]:
+        lines.append("    " + " ".join(node_text(member, source).split()))
+    if len(members) > max_members:
+        lines.append(f"    // ... {len(members) - max_members} more members")
+    lines.append("}")
+    return "\n".join(lines)
 
 
 def class_skeleton(node: Node, source: bytes) -> str:
@@ -315,7 +342,14 @@ class SymbolExtractor:
             elif kind in FUNCTION_NODES:
                 self.add(child, node_name(child, self.source), "function", parent)
             elif kind in TYPE_NODES:
-                self.add(child, node_name(child, self.source), kind.replace("_declaration", ""), parent)
+                self.add(
+                    child,
+                    node_name(child, self.source),
+                    kind.replace("_declaration", ""),
+                    parent,
+                    code=type_skeleton(child, self.source),
+                    calls=[],
+                )
             elif kind in DECLARATION_NODES:
                 self.visit_declaration(child, parent)
             else:
