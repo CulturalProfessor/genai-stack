@@ -27,8 +27,9 @@ MESSAGE_LABEL = "Message"
 KIND_CODE = "code"
 KIND_PDF = "pdf"
 
-# A new chat has no title until its first question arrives.
-UNTITLED = "New chat"
+# A new chat has no title until its first question arrives. Not "New chat",
+# which is the button that makes one - the list would read as two of those.
+UNTITLED = "Untitled chat"
 
 # Titles are the question's first line, cut to something a sidebar can show.
 TITLE_MAX_CHARS = 60
