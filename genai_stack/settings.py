@@ -1,0 +1,63 @@
+"""Environment configuration, parsed once instead of in every app."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+@dataclass(frozen=True)
+class Settings:
+    neo4j_uri: str
+    neo4j_username: str
+    neo4j_password: str
+    ollama_base_url: str | None
+    embedding_model: str | None
+    llm: str | None
+    code_index_path: Path
+    import_batch_size: int
+    api_key: str
+    allowed_origins: list[str] = field(default_factory=list)
+    rate_limit_requests: int = 30
+    rate_limit_window_seconds: int = 60
+
+    @property
+    def embedding_config(self) -> dict:
+        """Config passed to the embedding/chat model loaders."""
+        return {"ollama_base_url": self.ollama_base_url}
+
+
+def _split(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def load_settings() -> Settings:
+    load_dotenv(".env")
+
+    uri = os.getenv("NEO4J_URI")
+    if not uri:
+        raise RuntimeError("NEO4J_URI is not set - copy env.example to .env first")
+    # Remapping for the LangChain Neo4j integration.
+    os.environ["NEO4J_URL"] = uri
+
+    return Settings(
+        neo4j_uri=uri,
+        neo4j_username=os.getenv("NEO4J_USERNAME", "neo4j"),
+        neo4j_password=os.getenv("NEO4J_PASSWORD", ""),
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL"),
+        embedding_model=os.getenv("EMBEDDING_MODEL"),
+        llm=os.getenv("LLM"),
+        code_index_path=Path(
+            os.getenv("CODE_INDEX_PATH", "index/all_code_blocks.json")
+        ),
+        import_batch_size=int(os.getenv("IMPORT_BATCH_SIZE", "100")),
+        # Empty means no auth, which is the local-development default.
+        api_key=os.getenv("API_KEY", ""),
+        allowed_origins=_split(
+            os.getenv("ALLOWED_ORIGINS", "http://localhost:8505,http://localhost:5173")
+        ),
+        rate_limit_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "30")),
+        rate_limit_window_seconds=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")),
+    )

@@ -1,13 +1,13 @@
 import json
 import logging
-import os
+import sys
 import time
 from collections import defaultdict, deque
 from collections.abc import Generator
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock, Thread
 
-from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -15,61 +15,42 @@ from langchain_neo4j import Neo4jGraph
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from chains import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from genai_stack.chains import (
     configure_llm_only_chain,
     configure_qa_rag_chain,
     generate_ticket,
-    load_embedding_model,
-    load_llm,
 )
-from utils import BaseLogger, create_fulltext_index, create_vector_index
-
-load_dotenv(".env")
+from genai_stack.llm import load_embedding_model, load_llm
+from genai_stack.schema import BaseLogger, apply_schema
+from genai_stack.settings import load_settings
 
 logger = logging.getLogger(__name__)
-
-url = os.getenv("NEO4J_URI")
-username = os.getenv("NEO4J_USERNAME")
-password = os.getenv("NEO4J_PASSWORD")
-ollama_base_url = os.getenv("OLLAMA_BASE_URL")
-embedding_model_name = os.getenv("EMBEDDING_MODEL")
-llm_name = os.getenv("LLM")
-
-if not url:
-    raise RuntimeError("NEO4J_URI is not set - copy env.example to .env first")
-# Remapping for Langchain Neo4j integration
-os.environ["NEO4J_URL"] = url
-
-# Empty means "no auth", which is the local-development default.
-API_KEY = os.getenv("API_KEY", "")
-ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "ALLOWED_ORIGINS", "http://localhost:8505,http://localhost:5173"
-    ).split(",")
-    if origin.strip()
-]
-RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "30"))
-RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+settings = load_settings()
+llm_name = settings.llm
 
 embeddings, dimension = load_embedding_model(
-    embedding_model_name,
-    config={"ollama_base_url": ollama_base_url},
-    logger=BaseLogger(),
+    settings.embedding_model, config=settings.embedding_config, logger=BaseLogger()
 )
 
 # if Neo4j is local, you can go to http://localhost:7474/ to browse the database
-neo4j_graph = Neo4jGraph(url=url, username=username, password=password)
-create_vector_index(neo4j_graph, dimension)
-create_fulltext_index(neo4j_graph)
-
-llm = load_llm(
-    llm_name, logger=BaseLogger(), config={"ollama_base_url": ollama_base_url}
+neo4j_graph = Neo4jGraph(
+    url=settings.neo4j_uri,
+    username=settings.neo4j_username,
+    password=settings.neo4j_password,
 )
+apply_schema(neo4j_graph, dimension)
+
+llm = load_llm(llm_name, logger=BaseLogger(), config=settings.embedding_config)
 
 llm_chain = configure_llm_only_chain(llm)
 rag_chain = configure_qa_rag_chain(
-    llm, embeddings, embeddings_store_url=url, username=username, password=password
+    llm,
+    embeddings,
+    embeddings_store_url=settings.neo4j_uri,
+    username=settings.neo4j_username,
+    password=settings.neo4j_password,
 )
 
 
@@ -124,7 +105,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -136,15 +117,15 @@ _rate_limit_lock = Lock()
 
 def rate_limit(request: Request) -> None:
     """Cap requests per client IP so an exposed instance can't be drained."""
-    if RATE_LIMIT_REQUESTS <= 0:
+    if settings.rate_limit_requests <= 0:
         return
     client = request.client.host if request.client else "unknown"
     now = time.monotonic()
     with _rate_limit_lock:
         hits = _rate_limit_hits[client]
-        while hits and now - hits[0] > RATE_LIMIT_WINDOW_SECONDS:
+        while hits and now - hits[0] > settings.rate_limit_window_seconds:
             hits.popleft()
-        if len(hits) >= RATE_LIMIT_REQUESTS:
+        if len(hits) >= settings.rate_limit_requests:
             raise HTTPException(status_code=429, detail="Too many requests")
         hits.append(now)
 
@@ -155,10 +136,10 @@ def require_api_key(request: Request, x_api_key: str | None = Header(default=Non
     EventSource cannot set request headers, so the streaming endpoint also
     accepts the key as a query parameter.
     """
-    if not API_KEY:
+    if not settings.api_key:
         return
     provided = x_api_key or request.query_params.get("api_key")
-    if provided != API_KEY:
+    if provided != settings.api_key:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 

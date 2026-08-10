@@ -1,4 +1,5 @@
-import os
+import sys
+from pathlib import Path
 
 import streamlit as st
 from langchain.chains import RetrievalQA
@@ -7,33 +8,18 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_neo4j import Neo4jVector
 from streamlit.logger import get_logger
-from chains import (
-    load_embedding_model,
-    load_llm,
-)
 
-# load api key lib
-from dotenv import load_dotenv
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-load_dotenv(".env")
-
-
-url = os.getenv("NEO4J_URI")
-username = os.getenv("NEO4J_USERNAME")
-password = os.getenv("NEO4J_PASSWORD")
-ollama_base_url = os.getenv("OLLAMA_BASE_URL")
-embedding_model_name = os.getenv("EMBEDDING_MODEL")
-llm_name = os.getenv("LLM")
-if not url:
-    raise RuntimeError("NEO4J_URI is not set - copy env.example to .env first")
-# Remapping for Langchain Neo4j integration
-os.environ["NEO4J_URL"] = url
+from genai_stack.llm import load_embedding_model, load_llm
+from genai_stack.settings import load_settings
 
 logger = get_logger(__name__)
-
+settings = load_settings()
+llm_name = settings.llm
 
 embeddings, dimension = load_embedding_model(
-    embedding_model_name, config={"ollama_base_url": ollama_base_url}, logger=logger
+    settings.embedding_model, config=settings.embedding_config, logger=logger
 )
 
 
@@ -47,7 +33,7 @@ class StreamHandler(BaseCallbackHandler):
         self.container.markdown(self.text)
 
 
-llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_url})
+llm = load_llm(llm_name, logger=logger, config=settings.embedding_config)
 
 
 def main():
@@ -73,9 +59,9 @@ def main():
         # Store the chunks part in db (vector)
         vectorstore = Neo4jVector.from_texts(
             chunks,
-            url=url,
-            username=username,
-            password=password,
+            url=settings.neo4j_uri,
+            username=settings.neo4j_username,
+            password=settings.neo4j_password,
             embedding=embeddings,
             index_name="pdf_bot",
             node_label="PdfBotChunk",

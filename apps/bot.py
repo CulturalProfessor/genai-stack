@@ -1,44 +1,36 @@
-import os
+import sys
+from pathlib import Path
 
 import streamlit as st
 from streamlit.logger import get_logger
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_neo4j import Neo4jGraph
-from dotenv import load_dotenv
-from utils import (
-    create_fulltext_index,
-    create_vector_index,
-)
-from chains import (
-    load_embedding_model,
-    load_llm,
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from genai_stack.chains import (
     configure_llm_only_chain,
     configure_qa_rag_chain,
     generate_ticket,
 )
-
-load_dotenv(".env")
-
-url = os.getenv("NEO4J_URI")
-username = os.getenv("NEO4J_USERNAME")
-password = os.getenv("NEO4J_PASSWORD")
-ollama_base_url = os.getenv("OLLAMA_BASE_URL")
-embedding_model_name = os.getenv("EMBEDDING_MODEL")
-llm_name = os.getenv("LLM")
-if not url:
-    raise RuntimeError("NEO4J_URI is not set - copy env.example to .env first")
-# Remapping for Langchain Neo4j integration
-os.environ["NEO4J_URL"] = url
+from genai_stack.llm import load_embedding_model, load_llm
+from genai_stack.schema import apply_schema
+from genai_stack.settings import load_settings
 
 logger = get_logger(__name__)
+settings = load_settings()
+llm_name = settings.llm
 
 # if Neo4j is local, you can go to http://localhost:7474/ to browse the database
-neo4j_graph = Neo4jGraph(url=url, username=username, password=password)
-embeddings, dimension = load_embedding_model(
-    embedding_model_name, config={"ollama_base_url": ollama_base_url}, logger=logger
+neo4j_graph = Neo4jGraph(
+    url=settings.neo4j_uri,
+    username=settings.neo4j_username,
+    password=settings.neo4j_password,
 )
-create_vector_index(neo4j_graph, dimension)
-create_fulltext_index(neo4j_graph)
+embeddings, dimension = load_embedding_model(
+    settings.embedding_model, config=settings.embedding_config, logger=logger
+)
+apply_schema(neo4j_graph, dimension)
 
 
 class StreamHandler(BaseCallbackHandler):
@@ -51,11 +43,15 @@ class StreamHandler(BaseCallbackHandler):
         self.container.markdown(self.text)
 
 
-llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_url})
+llm = load_llm(llm_name, logger=logger, config=settings.embedding_config)
 
 llm_chain = configure_llm_only_chain(llm)
 rag_chain = configure_qa_rag_chain(
-    llm, embeddings, embeddings_store_url=url, username=username, password=password
+    llm,
+    embeddings,
+    embeddings_store_url=settings.neo4j_uri,
+    username=settings.neo4j_username,
+    password=settings.neo4j_password,
 )
 
 # Streamlit UI

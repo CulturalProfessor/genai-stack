@@ -1,11 +1,19 @@
-"""Neo4j schema helpers shared by the loader and the retrieval chain."""
+"""Neo4j schema for the code graph: labels, constraints and indexes.
+
+    (:File {path, name, language, depth})
+    (:Code {id, name, qualified_name, kind, parent, start_line, end_line,
+            signature, file_path, file_name, text, embedding})
+
+    (:File)-[:CONTAINS]->(:Code)     a file defines a symbol
+    (:Code)-[:CALLS]->(:Code)        a symbol invokes another
+    (:File)-[:IMPORTS]->(:File)      a file depends on another
+"""
 from __future__ import annotations
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Graph schema. Defined once here so the loader and the retriever agree.
 FILE_LABEL = "File"
 CODE_LABEL = "Code"
 CODE_TEXT_PROPERTY = "text"
@@ -17,29 +25,6 @@ FULLTEXT_INDEX_NAME = "code_fulltext"
 class BaseLogger:
     def __init__(self) -> None:
         self.info = print
-
-
-def extract_title_and_question(input_string):
-    lines = input_string.strip().split("\n")
-
-    title = ""
-    question = ""
-    is_question = False  # flag to know if we are inside a "Question" block
-
-    for line in lines:
-        if line.startswith("Title:"):
-            title = line.split("Title: ", 1)[1].strip()
-        elif line.startswith("Question:"):
-            question = line.split("Question: ", 1)[1].strip()
-            is_question = (
-                True  # set the flag to True once we encounter a "Question:" line
-            )
-        elif is_question:
-            # if the line does not start with "Question:" but we are inside a "Question" block,
-            # then it is a continuation of the question
-            question += "\n" + line.strip()
-
-    return title, question
 
 
 def create_constraints(driver) -> None:
@@ -70,7 +55,7 @@ def create_vector_index(driver, dimension: int) -> None:
     """Create the Code embedding index, recreating it if the dimension changed.
 
     Switching EMBEDDING_MODEL changes the vector width, and an index built for
-    the old width silently rejects the new vectors — so rebuild it instead.
+    the old width silently rejects the new vectors - so rebuild it instead.
     """
     current = _existing_vector_dimension(driver)
     if current is not None and current != dimension:
@@ -111,3 +96,10 @@ def create_fulltext_index(driver) -> None:
         ON EACH [c.name, c.signature, c.{CODE_TEXT_PROPERTY}]
         """
     )
+
+
+def apply_schema(driver, dimension: int) -> None:
+    """Everything the loader and the retriever need to exist up front."""
+    create_constraints(driver)
+    create_vector_index(driver, dimension)
+    create_fulltext_index(driver)
