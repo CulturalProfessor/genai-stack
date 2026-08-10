@@ -406,9 +406,45 @@ def build_index(
     return records
 
 
+def build_payload(
+    repo: Path,
+    repo_name: str | None = None,
+    ignore_dirs: set[str] | None = None,
+    ignore_globs: list[str] | None = None,
+    max_chars: int = 4000,
+    min_chars: int = 0,
+    source_url: str | None = None,
+) -> dict:
+    """Index a checkout and return the JSON structure the loader consumes.
+
+    Shared by the CLI and the loader UI so both produce an identical index.
+    """
+    repo = Path(repo)
+    records = build_index(
+        repo,
+        set(DEFAULT_IGNORE_DIRS) | set(ignore_dirs or ()),
+        DEFAULT_IGNORE_GLOBS + list(ignore_globs or ()),
+        max_chars,
+        min_chars,
+    )
+    payload: dict = {
+        "repo": repo_name or repo.name,
+        "files": [asdict(record) for record in records],
+    }
+    if source_url:
+        payload["source_url"] = source_url
+    return payload
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, default=Path("../Rocket.Chat"), help="Repository to index")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--repo", type=Path, help="Local repository to index")
+    source.add_argument(
+        "--github-url",
+        help="Public repository URL to clone and index, e.g. owner/repo",
+    )
+    parser.add_argument("--branch", help="Branch to clone (with --github-url)")
     # Written into index/, which docker-compose mounts into the loader container.
     parser.add_argument("--output", type=Path, default=Path("index/all_code_blocks.json"))
     # 4000 chars x the retriever's k=4 keeps the RAG prompt inside the LLM context.
@@ -427,28 +463,49 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 
-    repo = args.repo.resolve()
-    if not repo.is_dir():
-        logger.error("Repository not found: %s", repo)
-        return 1
-
-    records = build_index(
-        repo,
-        set(DEFAULT_IGNORE_DIRS) | set(args.ignore_dir),
-        DEFAULT_IGNORE_GLOBS + args.ignore_glob,
-        args.max_chars,
-        args.min_chars,
+    build_kwargs = dict(
+        ignore_dirs=set(args.ignore_dir),
+        ignore_globs=args.ignore_glob,
+        max_chars=args.max_chars,
+        min_chars=args.min_chars,
     )
-    payload = {
-        "repo": repo.name,
-        "files": [asdict(record) for record in records],
-    }
+
+    if args.github_url:
+        from genai_stack.sources import cloned_repository, parse_repo_url
+
+        try:
+            ref = parse_repo_url(args.github_url, args.branch)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            return 1
+        logger.info("Cloning %s...", ref.slug)
+        try:
+            with cloned_repository(ref) as checkout:
+                payload = build_payload(
+                    checkout,
+                    repo_name=ref.name,
+                    source_url=ref.clone_url,
+                    **build_kwargs,
+                )
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            return 1
+    else:
+        repo = (args.repo or Path("../Rocket.Chat")).resolve()
+        if not repo.is_dir():
+            logger.error("Repository not found: %s", repo)
+            return 1
+        payload = build_payload(repo, **build_kwargs)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    total_symbols = sum(len(record.symbols) for record in records)
+    total_symbols = sum(len(f["symbols"]) for f in payload["files"])
     logger.info(
-        "Wrote %d symbols from %d files to %s", total_symbols, len(records), args.output
+        "Wrote %d symbols from %d files to %s",
+        total_symbols,
+        len(payload["files"]),
+        args.output,
     )
     return 0
 
