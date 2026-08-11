@@ -149,11 +149,27 @@ def resolve_package_import(
     return None
 
 
+def resolve_alias_import(
+    specifier: str, aliases: list[dict], known_paths: set[str]
+) -> str | None:
+    """Resolve `@/lib/api` against a tsconfig `paths` entry."""
+    for alias in aliases:
+        if not specifier.startswith(alias["prefix"]):
+            continue
+        rest = specifier[len(alias["prefix"]) :]
+        for target in alias["targets"]:
+            found = _candidates(f"{target}/{rest}".strip("/").replace("//", "/"), known_paths)
+            if found:
+                return found
+    return None
+
+
 def resolve_import(
     from_path: str,
     specifier: str,
     known_paths: set[str],
     packages: dict[str, str] | None = None,
+    aliases: list[dict] | None = None,
 ) -> str | None:
     """Resolve an import to a file in the index, or None.
 
@@ -162,6 +178,10 @@ def resolve_import(
     package is internal and does resolve.
     """
     if not specifier.startswith("."):
+        if aliases:
+            found = resolve_alias_import(specifier, aliases, known_paths)
+            if found:
+                return found
         if packages:
             return resolve_package_import(specifier, packages, known_paths)
         return None
@@ -186,11 +206,14 @@ def iter_import_edges(index: dict) -> Iterator[dict]:
     """File-to-file edges for imports that point inside the indexed repo."""
     known_paths = {f["path"] for f in index.get("files", [])}
     packages = index.get("packages") or {}
+    aliases = index.get("aliases") or []
     for file_record in index.get("files", []):
         from_path = file_record["path"]
         seen: set[str] = set()
         for specifier in file_record.get("imports", []):
-            to_path = resolve_import(from_path, specifier, known_paths, packages)
+            to_path = resolve_import(
+                from_path, specifier, known_paths, packages, aliases
+            )
             if to_path and to_path != from_path and to_path not in seen:
                 seen.add(to_path)
                 yield {"from_path": from_path, "to_path": to_path}
@@ -226,6 +249,7 @@ class CallResolver:
     def __init__(self, index: dict):
         self.files = {f["path"]: f for f in index.get("files", [])}
         self.packages = index.get("packages") or {}
+        self.aliases = index.get("aliases") or []
         self.known_paths = set(self.files)
         self.by_name: dict[str, int] = {}
         self.in_file: set[tuple[str, str]] = set()
@@ -250,7 +274,9 @@ class CallResolver:
         return self._bindings[path]
 
     def _module_for(self, from_path: str, specifier: str) -> str | None:
-        return resolve_import(from_path, specifier, self.known_paths, self.packages)
+        return resolve_import(
+            from_path, specifier, self.known_paths, self.packages, self.aliases
+        )
 
     def find_export(self, path: str, name: str, depth: int = 0) -> str | None:
         """The file that actually defines `name`, as exposed by `path`.

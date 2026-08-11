@@ -204,6 +204,7 @@ def from_index(index: dict) -> HealthReport:
 
     known_paths = {f["path"] for f in files}
     packages = index.get("packages") or {}
+    aliases = index.get("aliases") or []
     code_imports = dangling = assets = package_imports = 0
     import_pairs: set[tuple[str, str]] = set()
     for record in files:
@@ -211,7 +212,7 @@ def from_index(index: dict) -> HealthReport:
             if not specifier.startswith("."):
                 # Bare, so external unless it names a package of this monorepo.
                 target = resolve_import(
-                    record["path"], specifier, known_paths, packages
+                    record["path"], specifier, known_paths, packages, aliases
                 )
                 if target is None:
                     continue
@@ -223,7 +224,9 @@ def from_index(index: dict) -> HealthReport:
                 assets += 1
                 continue
             code_imports += 1
-            target = resolve_import(record["path"], specifier, known_paths, packages)
+            target = resolve_import(
+                record["path"], specifier, known_paths, packages, aliases
+            )
             if target is None:
                 # Almost always a module the extractor produced no symbols for:
                 # build_index drops a file with an empty symbol list, and

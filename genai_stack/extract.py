@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -705,6 +706,51 @@ def find_workspace_packages(repo: Path, ignore_dirs: set[str]) -> dict[str, str]
     return packages
 
 
+def _strip_jsonc(text: str) -> str:
+    """tsconfig.json is JSON with comments and trailing commas."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"(^|\s)//[^\n]*", "", text)
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+def find_path_aliases(repo: Path, ignore_dirs: set[str]) -> list[dict]:
+    """`compilerOptions.paths` from every tsconfig, as repo-relative prefixes.
+
+    An alias is invisible to a resolver that only understands relative and
+    package specifiers, and a repo can use them for everything: this project's
+    own web client imports `@/...` 51 times and produced no edges at all.
+    """
+    aliases: list[dict] = []
+    for root, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+        for filename in filenames:
+            if not (filename.startswith("tsconfig") and filename.endswith(".json")):
+                continue
+            try:
+                config = json.loads(
+                    _strip_jsonc((Path(root) / filename).read_text(encoding="utf-8"))
+                )
+            except (OSError, ValueError) as exc:
+                logger.debug("Skipping %s/%s: %s", root, filename, exc)
+                continue
+            options = config.get("compilerOptions") or {}
+            base = Path(root) / (options.get("baseUrl") or ".")
+            for pattern, targets in (options.get("paths") or {}).items():
+                resolved = []
+                for target in targets:
+                    try:
+                        rel = (base / target.replace("*", "")).resolve()
+                        resolved.append(rel.relative_to(repo.resolve()).as_posix())
+                    except ValueError:
+                        continue  # points outside the repo
+                if resolved:
+                    aliases.append(
+                        {"prefix": pattern.replace("*", ""), "targets": resolved}
+                    )
+    # Longest prefix first, so `@/lib/` is not swallowed by `@/`.
+    return sorted(aliases, key=lambda a: -len(a["prefix"]))
+
+
 def build_index(
     repo: Path,
     ignore_dirs: set[str],
@@ -771,6 +817,7 @@ def build_payload(
     payload: dict = {
         "repo": repo_name or repo.name,
         "packages": find_workspace_packages(repo, skipped_dirs),
+        "aliases": find_path_aliases(repo, skipped_dirs),
         "files": [asdict(record) for record in records],
     }
     if source_url:

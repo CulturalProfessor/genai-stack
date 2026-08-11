@@ -314,3 +314,25 @@ def test_an_external_package_stays_unresolved():
 def test_without_a_package_map_bare_specifiers_are_left_alone():
     known = {"packages/scope-utils/src/index.ts"}
     assert resolve_import("app/main.ts", "@scope/utils", known) is None
+
+
+ALIASES = [{"prefix": "@/lib/", "targets": ["src/lib"]}, {"prefix": "@/", "targets": ["src"]}]
+
+
+def test_a_tsconfig_alias_resolves():
+    known = {"src/views/ChatView.tsx"}
+    assert (
+        resolve_import("src/App.tsx", "@/views/ChatView", known, None, ALIASES)
+        == "src/views/ChatView.tsx"
+    )
+
+
+def test_the_longest_alias_prefix_wins():
+    known = {"src/lib/api.ts"}
+    assert (
+        resolve_import("src/App.tsx", "@/lib/api", known, None, ALIASES) == "src/lib/api.ts"
+    )
+
+
+def test_an_unmatched_bare_specifier_is_still_external():
+    assert resolve_import("src/App.tsx", "react", {"react.ts"}, None, ALIASES) is None
