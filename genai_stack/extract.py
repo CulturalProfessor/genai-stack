@@ -131,6 +131,11 @@ class Symbol:
     # Names invoked inside this symbol. The loader turns these into CALLS
     # relationships so retrieval can walk from a symbol to what it uses.
     calls: list[str] = field(default_factory=list)
+    instantiates: list[str] = field(default_factory=list)
+    # Type names in the signature, and the class hierarchy for a class.
+    type_names: list[str] = field(default_factory=list)
+    extends: list[str] = field(default_factory=list)
+    implements: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -288,9 +293,17 @@ def callee_name(node: Node | None, source: bytes) -> str | None:
     return None
 
 
-def collect_calls(node: Node, source: bytes, exclude: str | None) -> list[str]:
-    """Every function/constructor name invoked anywhere inside `node`."""
-    names: set[str] = set()
+def collect_references(
+    node: Node, source: bytes, exclude: str | None
+) -> tuple[list[str], list[str]]:
+    """(called, instantiated) names invoked anywhere inside `node`.
+
+    Kept apart because they answer different questions - what this code does
+    versus what it builds - and folding `new Foo()` in with `foo()` made both
+    harder to follow from a hit.
+    """
+    called: set[str] = set()
+    built: set[str] = set()
     stack = [node]
     while stack:
         current = stack.pop()
@@ -301,9 +314,54 @@ def collect_calls(node: Node, source: bytes, exclude: str | None) -> list[str]:
             name = callee_name(target, source)
             # Self-recursion would only add a self-loop to the graph.
             if name and name != exclude:
-                names.add(name)
+                (built if current.type == "new_expression" else called).add(name)
+        stack.extend(current.named_children)
+    return sorted(called), sorted(built)
+
+
+def collect_calls(node: Node, source: bytes, exclude: str | None) -> list[str]:
+    return collect_references(node, source, exclude)[0]
+
+
+def collect_type_names(node: Node, source: bytes) -> list[str]:
+    """Type names in a declaration's signature, ignoring its body.
+
+    A type node has no calls of its own, so without these it is a dead end:
+    890 of Docusaurus's 3163 symbols are interfaces and type aliases, and a
+    vector hit on one had nothing for the graph to traverse. Walking the
+    signature links them to the code that takes or returns them.
+    """
+    names: set[str] = set()
+    stack = [
+        child
+        for child in node.named_children
+        # The body's local annotations describe the implementation, not the
+        # interface, and pull in far more than the signature does.
+        if child.type not in {"statement_block", "class_body"}
+    ]
+    while stack:
+        current = stack.pop()
+        if current.type == "type_identifier":
+            names.add(node_text(current, source))
         stack.extend(current.named_children)
     return sorted(names)
+
+
+def collect_heritage(node: Node, source: bytes) -> tuple[list[str], list[str]]:
+    """(extends, implements) for a class declaration."""
+    extends: list[str] = []
+    implements: list[str] = []
+    for child in node.named_children:
+        if child.type != "class_heritage":
+            continue
+        for clause in child.named_children:
+            target = extends if clause.type == "extends_clause" else implements
+            target.extend(
+                node_text(item, source)
+                for item in clause.named_children
+                if item.type in {"identifier", "type_identifier"}
+            )
+    return extends, implements
 
 
 def extract_imports(root: Node, source: bytes) -> list[str]:
@@ -483,6 +541,7 @@ class SymbolExtractor:
         parent: str | None,
         code: str | None = None,
         calls: list[str] | None = None,
+        instantiates: list[str] | None = None,
     ) -> None:
         if not name:
             return
@@ -494,6 +553,8 @@ class SymbolExtractor:
             code = code[: self.max_chars] + "\n// ... truncated"
         qualified_name = f"{parent}.{name}" if parent else name
         start_line = node.start_point[0] + 1
+        found_calls, found_new = collect_references(node, self.source, name)
+        extends, implements = collect_heritage(node, self.source)
         self.symbols.append(
             Symbol(
                 # Line number keeps the id unique when a name repeats in a file,
@@ -509,11 +570,11 @@ class SymbolExtractor:
                 code=code,
                 doc=doc_comment(node, self.source),
                 truncated=truncated,
-                calls=(
-                    calls
-                    if calls is not None
-                    else collect_calls(node, self.source, name)
-                ),
+                calls=calls if calls is not None else found_calls,
+                instantiates=instantiates if instantiates is not None else found_new,
+                type_names=collect_type_names(node, self.source),
+                extends=extends,
+                implements=implements,
             )
         )
 
@@ -534,6 +595,7 @@ class SymbolExtractor:
                     parent,
                     code=class_skeleton(child, self.source),
                     calls=[],
+                    instantiates=[],
                 )
                 body = child.child_by_field_name("body")
                 if body is not None:
@@ -548,6 +610,7 @@ class SymbolExtractor:
                     parent,
                     code=type_skeleton(child, self.source),
                     calls=[],
+                    instantiates=[],
                 )
             elif kind in DECLARATION_NODES:
                 self.visit_declaration(child, parent)

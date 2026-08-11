@@ -209,9 +209,11 @@ def test_calls_are_collected_per_symbol():
     ]
 
 
-def test_new_expressions_count_as_calls():
+def test_new_expressions_are_recorded_apart_from_calls():
+    """What code builds and what it invokes are different questions."""
     found = symbols_by_name(GRAPH_SOURCE)
-    assert "CrowdSync" in found["runSync"].calls
+    assert "CrowdSync" in found["runSync"].instantiates
+    assert "CrowdSync" not in found["runSync"].calls
 
 
 def test_method_calls_use_the_property_name():
@@ -436,3 +438,34 @@ def test_symbols_are_flagged_as_exported():
 def test_a_symbol_that_is_not_exported_is_not_flagged():
     symbols = fs.extract_symbols(b"function hidden(): void {}", "typescript", "a.ts")
     assert symbols[0].exported is False
+
+
+HERITAGE_SOURCE = """
+interface Options { retries: number }
+
+export class Client extends BaseClient implements Closeable {
+    connect(options: Options): Session { return open(options); }
+}
+
+export function widen(input: Options): Session { const x: Local = 1; return x; }
+"""
+
+
+def test_a_class_records_what_it_extends_and_implements():
+    found = symbols_by_name(HERITAGE_SOURCE)
+    assert found["Client"].extends == ["BaseClient"]
+    assert found["Client"].implements == ["Closeable"]
+
+
+def test_a_signature_records_its_parameter_and_return_types():
+    assert symbols_by_name(HERITAGE_SOURCE)["widen"].type_names == ["Options", "Session"]
+
+
+def test_types_used_only_inside_the_body_are_not_recorded():
+    """The body's annotations describe the implementation, not the interface."""
+    assert "Local" not in symbols_by_name(HERITAGE_SOURCE)["widen"].type_names
+
+
+def test_a_method_records_its_own_signature_types():
+    found = symbols_by_name(HERITAGE_SOURCE)
+    assert found["Client.connect"].type_names == ["Options", "Session"]
