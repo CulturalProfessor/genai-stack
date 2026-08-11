@@ -125,8 +125,14 @@ def test_delete_document_removes_chunks_and_the_document():
 
 
 def test_chunk_metadata_tags_every_chunk_with_its_document():
-    metadata = chunk_metadata("doc-1", "paper.pdf", 3)
+    metadata = chunk_metadata("doc-1", "paper.pdf", [1, 1, 2])
 
     assert len(metadata) == 3
     assert all(entry["document_id"] == "doc-1" for entry in metadata)
     assert all(entry["document_name"] == "paper.pdf" for entry in metadata)
+
+
+def test_chunk_metadata_carries_the_page_each_chunk_came_from():
+    """Chunks are cut per page, so a citation can name a page and not just
+    the document."""
+    assert [entry["page"] for entry in chunk_metadata("d", "p.pdf", [1, 1, 2])] == [1, 1, 2]

@@ -560,23 +560,37 @@ async def attach_pdf(conversation_id: str, file: UploadFile = File(...)):
         return {"document": asdict(existing), "reused": True}
 
     reader = PdfReader(BytesIO(content))
-    text = "".join(page.extract_text() or "" for page in reader.pages)
-    if not text.strip():
+    # Split each page separately rather than concatenating the document first.
+    # Joining pages with nothing between them ran the last word of one page
+    # into the first word of the next, and a chunk cut from the joined text
+    # could not say which page it came from.
+    pages = [
+        (number, page.extract_text() or "")
+        for number, page in enumerate(reader.pages, start=1)
+    ]
+    pages = [(number, text) for number, text in pages if text.strip()]
+    if not pages:
         raise HTTPException(
             status_code=422,
             detail="No text could be extracted - is this a scanned PDF?",
         )
 
-    chunks = RecursiveCharacterTextSplitter(
+    documents = RecursiveCharacterTextSplitter(
         chunk_size=1000, chunk_overlap=200, length_function=len
-    ).split_text(text)
+    ).create_documents(
+        [text for _, text in pages],
+        metadatas=[{"page": number} for number, _ in pages],
+    )
+    chunks = [document.page_content for document in documents]
     Neo4jVector.from_texts(
         chunks,
         url=settings.neo4j_uri,
         username=settings.neo4j_username,
         password=settings.neo4j_password,
         embedding=embeddings,
-        metadatas=chunk_metadata(doc_id, name, len(chunks)),
+        metadatas=chunk_metadata(
+            doc_id, name, [document.metadata["page"] for document in documents]
+        ),
         index_name=PDF_INDEX_NAME,
         node_label=PDF_CHUNK_LABEL,
     )

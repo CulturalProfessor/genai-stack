@@ -187,9 +187,13 @@ def delete_document(graph, document_id: str) -> None:
     )
 
 
-def chunk_metadata(document_id: str, name: str, count: int) -> list[dict]:
-    """Per-chunk metadata, which Neo4jVector writes as node properties."""
+def chunk_metadata(document_id: str, name: str, pages: list[int]) -> list[dict]:
+    """Per-chunk metadata, which Neo4jVector writes as node properties.
+
+    One page number per chunk, so an answer can cite where in the document it
+    came from rather than only which document.
+    """
     return [
-        {DOCUMENT_ID_PROPERTY: document_id, "document_name": name}
-        for _ in range(count)
+        {DOCUMENT_ID_PROPERTY: document_id, "document_name": name, "page": page}
+        for page in pages
     ]

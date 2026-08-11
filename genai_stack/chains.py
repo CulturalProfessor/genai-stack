@@ -161,10 +161,12 @@ class CodeAndDocumentsRetriever(BaseRetriever):
                 query, config={"callbacks": run_manager.get_child()}
             ):
                 # The chain cites metadata["source"], which for a symbol is the
-                # file it lives in. A chunk only knows which PDF it was cut from.
-                chunk.metadata["source"] = (
-                    chunk.metadata.get("document_name") or "an attached PDF"
-                )
+                # file it lives in. A chunk knows the PDF it was cut from and,
+                # since chunks are cut per page, which page that was - so a
+                # citation can point at somewhere in the document.
+                source = chunk.metadata.get("document_name") or "an attached PDF"
+                page = chunk.metadata.get("page")
+                chunk.metadata["source"] = f"{source} (p. {page})" if page else source
                 found.append(chunk)
         return found
 
