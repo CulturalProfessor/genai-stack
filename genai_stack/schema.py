@@ -8,6 +8,10 @@
     (:File)-[:CONTAINS]->(:Code)     a file defines a symbol
     (:File)-[:EXPORTS]->(:Code)      a file exposes a symbol to other files
     (:Code)-[:CALLS]->(:Code)        a symbol invokes another
+    (:Code)-[:INSTANTIATES]->(:Code) a symbol constructs another
+    (:Code)-[:REFERENCES_TYPE]->(:Code)  a signature names a type
+    (:Code)-[:EXTENDS]->(:Code)      a class derives from another
+    (:Code)-[:IMPLEMENTS]->(:Code)   a class satisfies an interface
     (:File)-[:IMPORTS]->(:File)      a file depends on another
 
 Repository is a record of what was imported, not part of retrieval: the

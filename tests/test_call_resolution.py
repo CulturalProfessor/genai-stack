@@ -126,7 +126,7 @@ def test_a_namespace_import_gives_nothing_to_look_up_by():
     assert CallResolver(index).resolve("a.ts", "helper") == "*"
 
 
-def test_call_edges_name_the_file_that_disambiguates_them():
+def test_a_call_edge_names_the_exact_symbol_it_reaches():
     index = {
         "files": [
             file_record("a.ts", [symbol("caller", ["handle"])],
@@ -136,13 +136,18 @@ def test_call_edges_name_the_file_that_disambiguates_them():
         ]
     }
     assert list(iter_call_edges(index)) == [
-        {"caller_id": "caller:1", "callee_file": "b.ts", "callee_name": "handle"}
+        {"caller_id": "caller:1", "callee_id": "handle:1"}
     ]
 
 
-def test_a_unique_name_edge_carries_no_file():
-    index = {"files": [
-        file_record("a.ts", [symbol("caller", ["only"])]),
-        file_record("b.ts", [symbol("only")]),
-    ]}
-    assert list(iter_call_edges(index))[0]["callee_file"] is None
+def test_a_name_declared_many_times_in_the_target_file_is_dropped():
+    """Otherwise one reference fans out across every declaration of it."""
+    index = {
+        "files": [
+            file_record("a.ts", [symbol("caller", ["Props"])],
+                        bindings=[{"local": "Props", "imported": "Props", "specifier": "./b"}]),
+            file_record("b.ts", [symbol("Props", exported=True, line=1),
+                                 symbol("Props", exported=True, line=9)]),
+        ]
+    }
+    assert list(iter_call_edges(index)) == []

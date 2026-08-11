@@ -30,7 +30,11 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from genai_stack.code_index import CallResolver, resolve_import
+from genai_stack.code_index import (
+    CallResolver,
+    iter_reference_edges,
+    resolve_import,
+)
 
 # Kinds that carry no call edges by construction, so their reachability depends
 # entirely on the type edges that do not exist yet.
@@ -69,6 +73,7 @@ class HealthReport:
 
     call_edges: int = 0
     import_edges: int = 0
+    edges_by_type: dict = field(default_factory=dict)
     # Relative specifiers that name code, and how many of them land on a file
     # the index knows about. Asset imports are counted apart, since they are
     # unresolvable by design rather than by failure.
@@ -155,7 +160,6 @@ def from_index(index: dict) -> HealthReport:
     # instrument could quietly disagree with the thing it was measuring.
     resolver = CallResolver(index)
     local = via_import = global_unique = ambiguous = external = 0
-    edges = 0
     in_degree: Counter = Counter()
     has_out: set[str] = set()
 
@@ -178,30 +182,25 @@ def from_index(index: dict) -> HealthReport:
                 else:
                     via_import += 1
 
-                # The loader matches the callee by name within the resolved
-                # file, so one call site links every same-named symbol there.
-                if target == "*":
-                    targets = 1
-                    key = ("*", callee)
-                else:
-                    targets = sum(
-                        1
-                        for other in files_by_path[target].get("symbols", [])
-                        if other["name"] == callee and other["id"] != symbol["id"]
-                    )
-                    key = (target, callee)
-                edges += targets
-                if targets:
-                    has_out.add(symbol["id"])
-                in_degree[key] += targets
-
     report.call_sites = local + via_import + global_unique + ambiguous + external
     report.resolved_local = local
     report.resolved_import = via_import
     report.resolved_global = global_unique
     report.dropped_ambiguous = ambiguous
     report.dropped_external = external
-    report.call_edges = edges
+
+    # Every edge kind, not just calls: a type node has no calls by
+    # construction, so counting only those would show it as unreachable even
+    # once something references it.
+    connected: set[str] = set()
+    for edge in iter_reference_edges(index):
+        report.edges_by_type[edge["type"]] = (
+            report.edges_by_type.get(edge["type"], 0) + 1
+        )
+        connected.add(edge["caller_id"])
+        connected.add(edge["callee_id"])
+        in_degree[edge["callee_id"]] += 1
+    report.call_edges = report.edges_by_type.get("CALLS", 0)
 
     known_paths = {f["path"] for f in files}
     packages = index.get("packages") or {}
@@ -244,15 +243,12 @@ def from_index(index: dict) -> HealthReport:
     types = types_linked = 0
     for record in files:
         for symbol in record.get("symbols", []):
-            incoming = in_degree.get((record["path"], symbol["name"]), 0) + in_degree.get(
-                ("*", symbol["name"]), 0
-            )
-            connected = incoming > 0 or symbol["id"] in has_out
-            if not connected:
+            linked = symbol["id"] in connected
+            if not linked:
                 isolated += 1
             if symbol["kind"] in TYPE_KINDS:
                 types += 1
-                if connected:
+                if linked:
                     types_linked += 1
     report.isolated_symbols = isolated
     report.type_symbols = types
@@ -357,7 +353,8 @@ def format_report(report: HealthReport) -> str:
         )
         out.append("")
 
-    out.append(_line("CALLS edges", report.call_edges))
+    for name, total in sorted(report.edges_by_type.items(), key=lambda kv: -kv[1]):
+        out.append(_line(f"{name} edges", total))
     out.append(_line("IMPORTS edges", report.import_edges))
     if report.code_imports:
         out.append(_line("relative code imports", report.code_imports))
@@ -372,10 +369,10 @@ def format_report(report: HealthReport) -> str:
         out.append(_line("relative asset imports (not edges)", report.asset_imports))
     out.append("")
 
-    out.append(_line("isolated symbols (no CALLS either way)", report.isolated_symbols, report.symbols))
+    out.append(_line("isolated symbols (no edge either way)", report.isolated_symbols, report.symbols))
     out.append(_line("type/interface symbols", report.type_symbols, report.symbols))
     out.append(
-        _line("  with any CALLS edge", report.type_symbols_with_edges, report.type_symbols or None)
+        _line("  reachable in the graph", report.type_symbols_with_edges, report.type_symbols or None)
     )
     out.append(_line("symbols carrying a doc comment", report.symbols_with_doc, report.symbols))
     out.append("")
@@ -387,7 +384,11 @@ def format_report(report: HealthReport) -> str:
         _line(f"nodes with in-degree >= {SUPER_NODE_DEGREE}", report.super_nodes)
     )
     out.append(
-        _line("  edges they absorb", report.super_node_edges, report.call_edges or None)
+        _line(
+            "  edges they absorb",
+            report.super_node_edges,
+            sum(report.edges_by_type.values()) or None,
+        )
     )
     return "\n".join(out)
 

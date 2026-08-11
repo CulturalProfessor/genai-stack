@@ -304,27 +304,80 @@ class CallResolver:
         return "*" if self.by_name.get(name, 0) == 1 else None
 
 
-def iter_call_edges(index: dict) -> Iterator[dict]:
-    """Caller-to-callee edges, resolved to the file holding the callee.
+# Which relationship each list of names on a symbol becomes.
+REFERENCE_EDGES = {
+    "calls": "CALLS",
+    "instantiates": "INSTANTIATES",
+    "type_names": "REFERENCES_TYPE",
+    "extends": "EXTENDS",
+    "implements": "IMPLEMENTS",
+}
+
+
+def _symbol_indexes(index: dict) -> tuple[dict, dict]:
+    """(name -> symbols, (file, name) -> symbols), for picking a target."""
+    by_name: dict[str, list[dict]] = {}
+    by_file_name: dict[tuple[str, str], list[dict]] = {}
+    for record in index.get("files", []):
+        for symbol in record.get("symbols", []):
+            by_name.setdefault(symbol["name"], []).append(symbol)
+            by_file_name.setdefault((record["path"], symbol["name"]), []).append(symbol)
+    return by_name, by_file_name
+
+
+def _pick(candidates: list[dict], caller_id: str) -> str | None:
+    """The one symbol a reference means, or None if that cannot be decided.
+
+    A file can declare the same name many times - `theme-classic.d.ts` declares
+    `Props` 215 times, once per `declare module` block. Matching those by name
+    turned a single type reference into 215 edges and one reference list into
+    54,940 of them. Preferring a single exported definition settles the common
+    case; where it does not, dropping the edge beats inventing 215.
+    """
+    options = [c for c in candidates if c["id"] != caller_id]
+    if len(options) == 1:
+        return options[0]["id"]
+    exported = [c for c in options if c.get("exported")]
+    return exported[0]["id"] if len(exported) == 1 else None
+
+
+def iter_reference_edges(index: dict) -> Iterator[dict]:
+    """Every symbol-to-symbol edge, resolved to the exact target symbol.
 
     Resolution lives here rather than in Cypher because following a re-export
     is a walk the loader can do once in Python, and because it can then be
-    tested without a database.
+    tested without a database. All five kinds resolve the same way - a name in
+    a file - so they share one resolver rather than one query each.
     """
     resolver = CallResolver(index)
+    by_name, by_file_name = _symbol_indexes(index)
     for record in index.get("files", []):
         for symbol in record.get("symbols", []):
-            for callee in symbol.get("calls", []):
-                target = resolver.resolve(record["path"], callee)
-                if target is None:
-                    continue
-                yield {
-                    "caller_id": symbol["id"],
-                    # None means the name was unique across the index, so the
-                    # loader matches on the name alone.
-                    "callee_file": None if target == "*" else target,
-                    "callee_name": callee,
-                }
+            for field_name, edge in REFERENCE_EDGES.items():
+                for name in symbol.get(field_name, []):
+                    target = resolver.resolve(record["path"], name)
+                    if target is None:
+                        continue
+                    candidates = (
+                        by_name.get(name, [])
+                        if target == "*"
+                        else by_file_name.get((target, name), [])
+                    )
+                    callee_id = _pick(candidates, symbol["id"])
+                    if callee_id is None:
+                        continue
+                    yield {
+                        "type": edge,
+                        "caller_id": symbol["id"],
+                        "callee_id": callee_id,
+                    }
+
+
+def iter_call_edges(index: dict) -> Iterator[dict]:
+    """Just the CALLS edges, for callers that only want those."""
+    for edge in iter_reference_edges(index):
+        if edge["type"] == "CALLS":
+            yield {k: v for k, v in edge.items() if k != "type"}
 
 
 def batched(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:

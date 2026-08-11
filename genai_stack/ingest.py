@@ -9,9 +9,9 @@ from langchain_neo4j import Neo4jGraph
 from genai_stack.code_index import (
     batched,
     count_symbols,
-    iter_call_edges,
     iter_file_rows,
     iter_import_edges,
+    iter_reference_edges,
     iter_rows,
 )
 from genai_stack.schema import (
@@ -52,17 +52,21 @@ CALL db.create.setNodeVectorProperty(c, '{CODE_EMBEDDING_PROPERTY}', row.embeddi
 MERGE (f)-[:CONTAINS]->(c)
 """
 
-# Call edges arrive already resolved by CallResolver, which knows which module
-# each name was imported from and can follow a re-export through a barrel. All
-# that is left here is to match the callee: by file and name when the resolver
-# placed it, by name alone when the name was unique across the index.
-CALLS_QUERY = f"""
+# Reference edges arrive already resolved to an exact symbol id, by a resolver
+# that knows which module each name was imported from and can follow a
+# re-export through a barrel. Matching on id rather than on a name and a file
+# is what keeps a name declared many times in one file from fanning a single
+# reference out across all of them.
+#
+# One query per relationship type because Cypher cannot parameterise a
+# relationship type, and APOC's procedure for it would make this the only place
+# in the loader that needs APOC.
+def reference_query(relationship: str) -> str:
+    return f"""
 UNWIND $rows AS row
 MATCH (caller:{CODE_LABEL} {{id: row.caller_id}})
-MATCH (callee:{CODE_LABEL} {{name: row.callee_name}})
-WHERE (row.callee_file IS NULL OR callee.file_path = row.callee_file)
-  AND callee <> caller
-MERGE (caller)-[:CALLS]->(callee)
+MATCH (callee:{CODE_LABEL} {{id: row.callee_id}})
+MERGE (caller)-[:{relationship}]->(callee)
 """
 
 # Only an exported symbol can be the target of an import, and knowing which
@@ -139,8 +143,19 @@ def build_relationships(
         if rows:
             graph.query(EXPORTS_QUERY, {"rows": rows})
 
-    for rows in batched(iter_call_edges(index), batch_size):
-        graph.query(CALLS_QUERY, {"rows": rows})
+    # Grouped by type so each batch is one query. The edges come out of the
+    # resolver interleaved, so they are bucketed as they arrive rather than
+    # walking the index once per relationship kind.
+    buckets: dict[str, list[dict]] = {}
+    for edge in iter_reference_edges(index):
+        rows = buckets.setdefault(edge["type"], [])
+        rows.append({k: v for k, v in edge.items() if k != "type"})
+        if len(rows) >= batch_size:
+            graph.query(reference_query(edge["type"]), {"rows": rows})
+            rows.clear()
+    for relationship, rows in buckets.items():
+        if rows:
+            graph.query(reference_query(relationship), {"rows": rows})
 
     for rows in batched(iter_import_edges(index), batch_size):
         graph.query(IMPORTS_QUERY, {"rows": rows})

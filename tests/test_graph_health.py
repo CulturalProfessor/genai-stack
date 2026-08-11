@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eval.graph_health import from_index
 
 
-def symbol(name, calls=(), kind="function", line=1, doc=None):
+def symbol(name, calls=(), kind="function", line=1, doc=None, exported=False):
     record = {
         "id": f"{name}:{line}",
         "name": name,
@@ -18,6 +18,7 @@ def symbol(name, calls=(), kind="function", line=1, doc=None):
         "signature": f"function {name}()",
         "code": f"function {name}() {{}}",
         "calls": list(calls),
+        "exported": exported,
     }
     if doc is not None:
         record["doc"] = doc
@@ -56,7 +57,9 @@ def test_call_sites_are_classified_the_way_the_import_does():
     assert report.resolution_rate == 2 / 3
 
 
-def test_a_local_name_defined_twice_in_one_file_makes_two_edges():
+def test_a_name_defined_twice_in_one_file_makes_no_edge():
+    """theme-classic.d.ts declares Props 215 times; linking a reference to all
+    of them turned 3213 references into 54940 edges."""
     index = {
         "files": [
             file_record(
@@ -65,7 +68,23 @@ def test_a_local_name_defined_twice_in_one_file_makes_two_edges():
             )
         ]
     }
-    assert from_index(index).call_edges == 2
+    assert from_index(index).call_edges == 0
+
+
+def test_a_single_exported_definition_settles_the_ambiguity():
+    index = {
+        "files": [
+            file_record(
+                "a.ts",
+                [
+                    symbol("caller", ["dup"]),
+                    symbol("dup", line=5, exported=True),
+                    symbol("dup", line=9),
+                ],
+            )
+        ]
+    }
+    assert from_index(index).call_edges == 1
 
 
 def test_isolated_symbols_are_those_with_no_call_either_way():
