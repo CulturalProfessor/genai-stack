@@ -125,6 +125,9 @@ class Symbol:
     # returned text stays exactly what the file contains.
     doc: str | None = None
     truncated: bool = False
+    # Whether the file exposes this symbol. Only an exported symbol can be the
+    # target of an import, so this is what scopes call resolution.
+    exported: bool = False
     # Names invoked inside this symbol. The loader turns these into CALLS
     # relationships so retrieval can walk from a symbol to what it uses.
     calls: list[str] = field(default_factory=list)
@@ -139,6 +142,11 @@ class FileRecord:
     symbols: list[Symbol] = field(default_factory=list)
     # Raw module specifiers; the loader resolves the relative ones to files.
     imports: list[str] = field(default_factory=list)
+    # Kept beside `imports` rather than replacing it: the two answer different
+    # questions - which files this one depends on, and which name came from
+    # which of them - and only the second is needed to resolve a call.
+    bindings: list[dict] = field(default_factory=list)
+    re_exports: list[dict] = field(default_factory=list)
 
 
 def is_ignored(rel_path: Path, ignore_dirs: set[str], ignore_globs: list[str]) -> bool:
@@ -320,6 +328,143 @@ def extract_imports(root: Node, source: bytes) -> list[str]:
     return sorted(specifiers)
 
 
+@dataclass
+class ModuleInterface:
+    """Which local name came from where, and what this file exposes.
+
+    Resolving a call by name alone cannot tell two `handle`s apart. Knowing
+    that *this* file's `handle` is the one imported from `./handlers` picks the
+    right one, and `re_exports` is how that walk gets through a barrel to the
+    file where the name is actually defined.
+    """
+
+    # {local, imported, specifier}. `imported` is "default" for a default
+    # import and "*" for a namespace one.
+    bindings: list[dict] = field(default_factory=list)
+    # {specifier, imported, local}, with "*" for `export * from`.
+    re_exports: list[dict] = field(default_factory=list)
+    # Names this file exposes directly, as opposed to passing through.
+    exported_names: list[str] = field(default_factory=list)
+
+
+def _string_value(node: Node, source: bytes) -> str:
+    return node_text(node, source).strip("'\"`")
+
+
+def _specifier_pair(node: Node, source: bytes) -> tuple[str, str] | None:
+    """(imported, local) for an import_specifier or export_specifier."""
+    name = node.child_by_field_name("name")
+    if name is None:
+        return None
+    alias = node.child_by_field_name("alias")
+    imported = node_text(name, source)
+    return imported, node_text(alias, source) if alias is not None else imported
+
+
+def _declared_names(node: Node, source: bytes) -> list[str]:
+    """The names a declaration introduces, whether or not it is a binding list."""
+    if node.type in DECLARATION_NODES:
+        return [
+            name
+            for child in node.named_children
+            if child.type == "variable_declarator"
+            for name in [node_name(child, source)]
+            if name
+        ]
+    name = node_name(node, source)
+    return [name] if name else []
+
+
+def extract_module_interface(root: Node, source: bytes) -> ModuleInterface:
+    """Walk the import and export statements of one file."""
+    interface = ModuleInterface()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "import_statement":
+            _read_import(node, source, interface)
+        elif node.type == "export_statement":
+            _read_export(node, source, interface)
+        stack.extend(node.named_children)
+    return interface
+
+
+def _read_import(node: Node, source: bytes, interface: ModuleInterface) -> None:
+    source_node = node.child_by_field_name("source")
+    if source_node is None:
+        return
+    specifier = _string_value(source_node, source)
+    for clause in node.named_children:
+        if clause.type != "import_clause":
+            continue
+        for child in clause.named_children:
+            if child.type == "identifier":
+                interface.bindings.append(
+                    {
+                        "local": node_text(child, source),
+                        "imported": "default",
+                        "specifier": specifier,
+                    }
+                )
+            elif child.type == "namespace_import" and child.named_children:
+                interface.bindings.append(
+                    {
+                        "local": node_text(child.named_children[0], source),
+                        "imported": "*",
+                        "specifier": specifier,
+                    }
+                )
+            elif child.type == "named_imports":
+                for item in child.named_children:
+                    pair = _specifier_pair(item, source)
+                    if item.type == "import_specifier" and pair:
+                        imported, local = pair
+                        interface.bindings.append(
+                            {
+                                "local": local,
+                                "imported": imported,
+                                "specifier": specifier,
+                            }
+                        )
+
+
+def _read_export(node: Node, source: bytes, interface: ModuleInterface) -> None:
+    source_node = node.child_by_field_name("source")
+    clause = next(
+        (child for child in node.named_children if child.type == "export_clause"), None
+    )
+
+    if source_node is not None:
+        # `export ... from './x'` - a name this file passes through rather than
+        # defines. Following these is what gets a lookup through a barrel.
+        specifier = _string_value(source_node, source)
+        if clause is None:
+            interface.re_exports.append(
+                {"specifier": specifier, "imported": "*", "local": "*"}
+            )
+            return
+        for item in clause.named_children:
+            pair = _specifier_pair(item, source)
+            if pair:
+                imported, local = pair
+                interface.re_exports.append(
+                    {"specifier": specifier, "imported": imported, "local": local}
+                )
+        return
+
+    if clause is not None:
+        # `export {local, other as alias}` - names declared in this file.
+        for item in clause.named_children:
+            pair = _specifier_pair(item, source)
+            if pair:
+                interface.exported_names.append(pair[1])
+        return
+
+    declaration = node.child_by_field_name("declaration")
+    if declaration is not None:
+        interface.exported_names.extend(_declared_names(declaration, source))
+
+
 class SymbolExtractor:
     """Collects symbols from one parsed file."""
 
@@ -440,12 +585,22 @@ def parse_file(
     rel_path: str,
     max_chars: int = 4000,
     min_chars: int = 0,
-) -> tuple[list[Symbol], list[str]]:
-    """Parse once, returning the file's symbols and its import specifiers."""
+) -> tuple[list[Symbol], list[str], ModuleInterface]:
+    """Parse once, returning the symbols, the import specifiers and the
+    module's interface."""
     tree = get_parser(language).parse(source)
     extractor = SymbolExtractor(source, rel_path, max_chars, min_chars)
     extractor.visit(tree.root_node)
-    return extractor.symbols, extract_imports(tree.root_node, source)
+    interface = extract_module_interface(tree.root_node, source)
+
+    # Marked from the export statements rather than threaded through visit():
+    # `export function foo()` and a later `export {foo}` both make foo public,
+    # and only one of them is visible where the symbol is recorded.
+    exported = set(interface.exported_names)
+    for symbol in extractor.symbols:
+        symbol.exported = symbol.name in exported
+
+    return extractor.symbols, extract_imports(tree.root_node, source), interface
 
 
 def extract_symbols(
@@ -456,6 +611,11 @@ def extract_symbols(
     min_chars: int = 0,
 ) -> list[Symbol]:
     return parse_file(source, language, rel_path, max_chars, min_chars)[0]
+
+
+def extract_interface(source: bytes, language: str) -> ModuleInterface:
+    tree = get_parser(language).parse(source)
+    return extract_module_interface(tree.root_node, source)
 
 
 def build_index(
@@ -471,7 +631,7 @@ def build_index(
         rel_path = path.relative_to(repo).as_posix()
         try:
             source = path.read_bytes()
-            symbols, imports = parse_file(
+            symbols, imports, interface = parse_file(
                 source, language, rel_path, max_chars, min_chars
             )
         except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
@@ -490,6 +650,8 @@ def build_index(
                 depth=len(path.relative_to(repo).parts) - 1,
                 symbols=symbols,
                 imports=imports,
+                bindings=interface.bindings,
+                re_exports=interface.re_exports,
             )
         )
     if failures:

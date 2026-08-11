@@ -230,7 +230,7 @@ def test_recursive_calls_do_not_self_link():
 
 
 def test_imports_cover_import_and_require():
-    _, imports = fs.parse_file(GRAPH_SOURCE.encode(), "typescript", "src/crowd.ts")
+    _, imports, _ = fs.parse_file(GRAPH_SOURCE.encode(), "typescript", "src/crowd.ts")
     assert imports == ["../legacy/sync", "./util/text", "meteor/accounts-base"]
 
 
@@ -366,3 +366,73 @@ def test_the_doc_is_kept_out_of_the_code():
 def test_an_overlong_comment_is_dropped():
     source = f"/* {'x' * 2000} */\nexport function big(): void {{}}".encode()
     assert fs.extract_symbols(source, "typescript", "a.ts")[0].doc is None
+
+
+INTERFACE_SOURCE = """
+import {resolve, join as joinPath} from './paths';
+import loadConfig from './config';
+import * as helpers from './helpers';
+
+export {parse} from './parser';
+export * from './types';
+
+export function build(): void {}
+export const limit = 5;
+const internal = () => {};
+export {internal};
+"""
+
+
+def interface():
+    return fs.extract_interface(INTERFACE_SOURCE.encode(), "typescript")
+
+
+def binding(local):
+    return next(b for b in interface().bindings if b["local"] == local)
+
+
+def test_a_named_import_records_where_the_name_came_from():
+    assert binding("resolve") == {
+        "local": "resolve", "imported": "resolve", "specifier": "./paths"
+    }
+
+
+def test_an_aliased_import_keeps_both_names():
+    """The call site uses the alias; the source module knows the original."""
+    assert binding("joinPath")["imported"] == "join"
+
+
+def test_a_default_import_is_marked_as_such():
+    assert binding("loadConfig")["imported"] == "default"
+
+
+def test_a_namespace_import_is_recorded():
+    assert binding("helpers")["imported"] == "*"
+
+
+def test_a_re_export_names_the_module_it_passes_through_from():
+    assert {"specifier": "./parser", "imported": "parse", "local": "parse"} in (
+        interface().re_exports
+    )
+
+
+def test_a_star_re_export_is_recorded_so_a_barrel_can_be_followed():
+    assert {"specifier": "./types", "imported": "*", "local": "*"} in (
+        interface().re_exports
+    )
+
+
+def test_exported_names_cover_declarations_and_export_clauses():
+    names = set(interface().exported_names)
+    assert {"build", "limit", "internal"} <= names
+
+
+def test_symbols_are_flagged_as_exported():
+    symbols = {s.name: s for s in fs.extract_symbols(INTERFACE_SOURCE.encode(), "typescript", "a.ts")}
+    assert symbols["build"].exported is True
+    assert symbols["internal"].exported is True
+
+
+def test_a_symbol_that_is_not_exported_is_not_flagged():
+    symbols = fs.extract_symbols(b"function hidden(): void {}", "typescript", "a.ts")
+    assert symbols[0].exported is False
