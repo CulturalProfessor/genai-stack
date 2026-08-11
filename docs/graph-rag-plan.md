@@ -135,9 +135,25 @@ doing against a throwaway instance rather than the working one.
 
 ---
 
-## Phase 1 — Data-loss fixes
+## Phase 1 — Data-loss fixes — **done**
 
 Both are text corruption. Neither needs measurement.
+
+Verified against a fresh `facebook/docusaurus` checkout, which reproduces the committed
+baseline exactly (774 files, 3163 symbols, 479 IMPORTS, 68 dangling, 54.4% isolated) —
+so the extraction pipeline matches whatever produced the committed index.
+
+| | before | after |
+|---|---|---|
+| symbols carrying a doc comment | 0 | **615 (19.4%)** |
+| files | 774 | **961** |
+| IMPORTS edges | 479 | **687 (+43%)** |
+| imports pointing at nothing | 68 (12.4%) | **6 (0.9%)** |
+
+F1 was fixed here rather than in Phase 3: files are now merged in a pass of their own
+before the symbols, and `IMPORT_SUFFIXES` tries `.d.ts` last. The six remaining
+danglers are legitimate — two name build output absent from a checkout, four sit under
+a source directory called `build` that `DEFAULT_IGNORE_DIRS` prunes.
 
 ### 1a. Attach JSDoc to symbols
 **Files:** `genai_stack/extract.py`
@@ -265,10 +281,10 @@ of being the sole candidate.
 
 **Files:** `extract.py`, `code_index.py`, `ingest.py`, `schema.py`
 
-0. **Prerequisite (F1).** Emit a `FileRecord` for every parsed file, symbols or not, so
-   imports have somewhere to land; record non-function `const` exports; follow
-   re-exports through barrels. Without this, steps 1–3 fall through for 12.4% of
-   internal imports.
+0. **Prerequisite (F1)** — *done in Phase 1*. Files are recorded whether or not they
+   define symbols, and `.d.ts` resolves. Still outstanding from F1: recording
+   non-function `const` exports, and following re-exports through barrels
+   (`export * from './x'`), which step 2 needs to know what a barrel actually exposes.
 1. `extract_imports` ([extract.py:248](../genai_stack/extract.py)) currently keeps only the
    module string. Record bindings instead:
    `{specifier, names: [{imported, local}], default_local, namespace_local}`.
