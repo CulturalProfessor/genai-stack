@@ -13,6 +13,8 @@ LICENSE
 **/__pycache__
 **/*.pyc
 .pytest_cache
-front-end/node_modules
+# A host install would otherwise be copied over the one the image built, and
+# `COPY web/ ./` in web.Dockerfile happens after `npm install`.
+**/node_modules
 embedding_model/*
 !embedding_model/.ignore
