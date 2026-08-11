@@ -273,7 +273,41 @@ that a second run can diff.
 
 ---
 
-## Phase 3 — Import-scoped call resolution + `EXPORTS`
+## Phase 3 — Import-scoped call resolution + `EXPORTS` — **done**
+
+Measured on Docusaurus:
+
+| | before | after |
+|---|---|---|
+| resolved in-file | 820 | 820 |
+| resolved via an import | — | **885** |
+| guessed by unique name | 1063 | **227** |
+| dropped as ambiguous | 542 | 493 |
+| intra-repo resolution rate | 77.6% | 79.7% |
+| IMPORTS edges | 687 | **1433** |
+
+**The prediction in the original write-up was wrong, and worth recording.** It said this
+would "convert most of the 542 ambiguous drops into correct edges". It did not — only 49
+of them. What it actually converted was the *guesses*: 836 edges that were previously
+resolved only because nothing else happened to share the name are now resolved by
+knowing which module the name came from. This is a precision change, not a recall one,
+and the eval in Phase 2 will not show it as an improvement in recall@k.
+
+Two findings behind that:
+
+**F4. In a monorepo, most cross-file references are bare specifiers.** `resolve_import`
+dropped every bare specifier as external. 758 of Docusaurus's (26%) name a sibling
+workspace package. Resolving them against each `package.json` name doubled the import
+graph. The same gap exists for `tsconfig` `paths` aliases — `web/src` in this repo uses
+`@/` for all 51 of its imports and produces zero edges — which is still outstanding.
+
+**F5. The remaining 493 ambiguous calls are mostly not resolvable by import scoping.**
+181 of them are `Error`, a language global the repo also defines; those are now
+excluded rather than linked. Most of the rest are method calls, where `callee_name`
+collapses `service.create()` to `create` and there is no import binding to scope by.
+Fixing those needs the receiver, which is what Phase 4's type edges would give.
+
+## Phase 3 (original plan) — Import-scoped call resolution + `EXPORTS`
 
 Biggest single graph-quality gain. Recovers most of the 542 dropped edges and makes
 the 1063 "global-unique" ones trustworthy — today those are correct only by accident
