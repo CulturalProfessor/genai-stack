@@ -6,6 +6,7 @@
             signature, doc, file_path, file_name, text, embedding})
 
     (:File)-[:CONTAINS]->(:Code)     a file defines a symbol
+    (:File)-[:EXPORTS]->(:Code)      a file exposes a symbol to other files
     (:Code)-[:CALLS]->(:Code)        a symbol invokes another
     (:File)-[:IMPORTS]->(:File)      a file depends on another
 

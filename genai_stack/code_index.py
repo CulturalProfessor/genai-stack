@@ -84,6 +84,7 @@ def iter_rows(index: dict) -> Iterator[dict]:
                 "end_line": symbol["end_line"],
                 "signature": symbol["signature"],
                 "doc": symbol.get("doc"),
+                "exported": bool(symbol.get("exported")),
                 "file_path": file_record["path"],
                 "file_name": file_record["name"],
                 "language": file_record["language"],
@@ -193,6 +194,137 @@ def iter_import_edges(index: dict) -> Iterator[dict]:
             if to_path and to_path != from_path and to_path not in seen:
                 seen.add(to_path)
                 yield {"from_path": from_path, "to_path": to_path}
+
+
+# Names that belong to the language, not to the repository. A repo that happens
+# to define its own `Error` should not collect an edge from every `new Error()`
+# in the codebase - and with 181 such call sites in Docusaurus, that one name
+# would otherwise be among the best connected nodes in the graph.
+LANGUAGE_GLOBALS = {
+    "Array", "Boolean", "Date", "Error", "EvalError", "Function", "JSON", "Map",
+    "Math", "Number", "Object", "Promise", "Proxy", "RangeError", "ReferenceError",
+    "Reflect", "RegExp", "Set", "String", "Symbol", "SyntaxError", "TypeError",
+    "URIError", "URL", "URLSearchParams", "WeakMap", "WeakSet", "console",
+}
+
+
+class CallResolver:
+    """Works out which symbol a call by name refers to.
+
+    Resolution order, most specific first:
+
+    1. a definition in the same file
+    2. the module the name was imported from, following re-exports so a barrel
+       leads to wherever the name is really defined
+    3. a name unique across the whole index
+    4. give up
+
+    Step 2 is what makes step 3 rare. On its own, step 3 is a guess that only
+    looks right because nothing else happens to share the name.
+    """
+
+    def __init__(self, index: dict):
+        self.files = {f["path"]: f for f in index.get("files", [])}
+        self.packages = index.get("packages") or {}
+        self.known_paths = set(self.files)
+        self.by_name: dict[str, int] = {}
+        self.in_file: set[tuple[str, str]] = set()
+        self.exports: dict[str, set[str]] = {}
+        for path, record in self.files.items():
+            exported: set[str] = set()
+            for symbol in record.get("symbols", []):
+                name = symbol["name"]
+                self.by_name[name] = self.by_name.get(name, 0) + 1
+                self.in_file.add((path, name))
+                if symbol.get("exported"):
+                    exported.add(name)
+            self.exports[path] = exported
+        self._bindings: dict[str, dict[str, dict]] = {}
+
+    def bindings_for(self, path: str) -> dict[str, dict]:
+        if path not in self._bindings:
+            self._bindings[path] = {
+                binding["local"]: binding
+                for binding in self.files[path].get("bindings", [])
+            }
+        return self._bindings[path]
+
+    def _module_for(self, from_path: str, specifier: str) -> str | None:
+        return resolve_import(from_path, specifier, self.known_paths, self.packages)
+
+    def find_export(self, path: str, name: str, depth: int = 0) -> str | None:
+        """The file that actually defines `name`, as exposed by `path`.
+
+        A barrel exposes names it does not define, so follow the re-export to
+        the file behind it. Bounded, because `export *` between two barrels can
+        cycle and does.
+        """
+        if depth > 3 or path not in self.files:
+            return None
+        if name in self.exports.get(path, ()):
+            return path
+        for re_export in self.files[path].get("re_exports", []):
+            target = self._module_for(path, re_export["specifier"])
+            if target is None:
+                continue
+            if re_export["local"] == "*":
+                found = self.find_export(target, name, depth + 1)
+            elif re_export["local"] == name:
+                found = self.find_export(target, re_export["imported"], depth + 1)
+            else:
+                continue
+            if found:
+                return found
+        return None
+
+    def resolve(self, from_path: str, name: str) -> str | None:
+        """The file holding the symbol `name` refers to.
+
+        Returns "*" when the name is unique across the index and so needs no
+        file to disambiguate it, and None when the call cannot be placed.
+        """
+        if (from_path, name) in self.in_file:
+            return from_path
+
+        binding = self.bindings_for(from_path).get(name)
+        # A namespace import binds the namespace, not the names reached through
+        # it, so there is nothing here to look the callee up by.
+        if binding is not None and binding["imported"] != "*":
+            target = self._module_for(from_path, binding["specifier"])
+            if target is not None:
+                imported = (
+                    name if binding["imported"] == "default" else binding["imported"]
+                )
+                found = self.find_export(target, imported)
+                if found:
+                    return found
+
+        if name in LANGUAGE_GLOBALS:
+            return None
+        return "*" if self.by_name.get(name, 0) == 1 else None
+
+
+def iter_call_edges(index: dict) -> Iterator[dict]:
+    """Caller-to-callee edges, resolved to the file holding the callee.
+
+    Resolution lives here rather than in Cypher because following a re-export
+    is a walk the loader can do once in Python, and because it can then be
+    tested without a database.
+    """
+    resolver = CallResolver(index)
+    for record in index.get("files", []):
+        for symbol in record.get("symbols", []):
+            for callee in symbol.get("calls", []):
+                target = resolver.resolve(record["path"], callee)
+                if target is None:
+                    continue
+                yield {
+                    "caller_id": symbol["id"],
+                    # None means the name was unique across the index, so the
+                    # loader matches on the name alone.
+                    "callee_file": None if target == "*" else target,
+                    "callee_name": callee,
+                }
 
 
 def batched(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:

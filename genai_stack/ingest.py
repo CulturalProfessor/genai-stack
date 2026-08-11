@@ -9,6 +9,7 @@ from langchain_neo4j import Neo4jGraph
 from genai_stack.code_index import (
     batched,
     count_symbols,
+    iter_call_edges,
     iter_file_rows,
     iter_import_edges,
     iter_rows,
@@ -51,35 +52,26 @@ CALL db.create.setNodeVectorProperty(c, '{CODE_EMBEDDING_PROPERTY}', row.embeddi
 MERGE (f)-[:CONTAINS]->(c)
 """
 
-# Call edges are resolved by name in two passes. A definition in the same file
-# always wins; otherwise the name must be unique across the repo, because
-# linking every `handle` in the codebase to every caller of `handle` would bury
-# the real relationships in noise.
-LOCAL_CALLS_QUERY = f"""
+# Call edges arrive already resolved by CallResolver, which knows which module
+# each name was imported from and can follow a re-export through a barrel. All
+# that is left here is to match the callee: by file and name when the resolver
+# placed it, by name alone when the name was unique across the index.
+CALLS_QUERY = f"""
 UNWIND $rows AS row
-MATCH (caller:{CODE_LABEL} {{id: row.id}})
-UNWIND row.calls AS callee_name
-MATCH (callee:{CODE_LABEL} {{name: callee_name, file_path: row.file_path}})
-WHERE callee <> caller
+MATCH (caller:{CODE_LABEL} {{id: row.caller_id}})
+MATCH (callee:{CODE_LABEL} {{name: row.callee_name}})
+WHERE (row.callee_file IS NULL OR callee.file_path = row.callee_file)
+  AND callee <> caller
 MERGE (caller)-[:CALLS]->(callee)
 """
 
-GLOBAL_CALLS_QUERY = f"""
+# Only an exported symbol can be the target of an import, and knowing which
+# ones are exported is what lets a question ask what a module exposes.
+EXPORTS_QUERY = f"""
 UNWIND $rows AS row
-MATCH (caller:{CODE_LABEL} {{id: row.id}})
-UNWIND row.calls AS callee_name
-WITH caller, row, callee_name
-WHERE NOT EXISTS {{
-    MATCH (:{CODE_LABEL} {{name: callee_name, file_path: row.file_path}})
-}}
-CALL (callee_name) {{
-    MATCH (candidate:{CODE_LABEL} {{name: callee_name}})
-    WITH collect(candidate) AS candidates
-    RETURN CASE WHEN size(candidates) = 1 THEN candidates[0] ELSE NULL END AS callee
-}}
-WITH caller, callee
-WHERE callee IS NOT NULL AND callee <> caller
-MERGE (caller)-[:CALLS]->(callee)
+MATCH (f:{FILE_LABEL} {{path: row.file_path}})
+MATCH (c:{CODE_LABEL} {{id: row.id}})
+MERGE (f)-[:EXPORTS]->(c)
 """
 
 IMPORTS_QUERY = f"""
@@ -103,7 +95,7 @@ def import_index(
     """
     total = count_symbols(index)
     imported = 0
-    call_batches: list[list[dict]] = []
+    export_batches: list[list[dict]] = []
 
     # Files first, so a file that defines no symbols still exists for the
     # IMPORTS edges to land on. IMPORT_QUERY only reaches a file through one
@@ -117,35 +109,38 @@ def import_index(
         for row, vector in zip(batch, vectors):
             row["embedding"] = vector
         graph.query(IMPORT_QUERY, {"rows": batch})
-        # Relationships are built afterwards: a call can point at a symbol from
-        # a file that has not been written yet.
-        call_batches.append(
+        export_batches.append(
             [
-                {"id": row["id"], "file_path": row["file_path"], "calls": row["calls"]}
+                {"id": row["id"], "file_path": row["file_path"]}
                 for row in batch
-                if row["calls"]
+                if row["exported"]
             ]
         )
         imported += len(batch)
         if on_progress is not None:
             on_progress(imported, total)
 
-    build_relationships(index, call_batches, graph, batch_size)
+    build_relationships(index, export_batches, graph, batch_size)
     return imported
 
 
 def build_relationships(
     index: dict,
-    call_batches: list[list[dict]],
+    export_batches: list[list[dict]],
     graph: Neo4jGraph,
     batch_size: int = 100,
 ) -> None:
-    """Create CALLS and IMPORTS edges once every node exists."""
-    for rows in call_batches:
-        if not rows:
-            continue
-        graph.query(LOCAL_CALLS_QUERY, {"rows": rows})
-        graph.query(GLOBAL_CALLS_QUERY, {"rows": rows})
+    """Create EXPORTS, CALLS and IMPORTS edges once every node exists.
+
+    Relationships are built after the nodes because a call can point at a
+    symbol from a file that has not been written yet.
+    """
+    for rows in export_batches:
+        if rows:
+            graph.query(EXPORTS_QUERY, {"rows": rows})
+
+    for rows in batched(iter_call_edges(index), batch_size):
+        graph.query(CALLS_QUERY, {"rows": rows})
 
     for rows in batched(iter_import_edges(index), batch_size):
         graph.query(IMPORTS_QUERY, {"rows": rows})

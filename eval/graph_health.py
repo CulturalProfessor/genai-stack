@@ -11,9 +11,9 @@ Two modes, one report:
     --neo4j                               from the live graph
 
 The index mode is fast enough for a tight loop, and runs with nothing installed
-beyond the standard library. The Neo4j mode is the check on it: the resolution
-counts below reimplement the Cypher in ingest.py, and a disagreement between the
-two means the reimplementation has drifted from what actually gets stored.
+beyond the standard library. It calls the same CallResolver the loader does, so
+it reports what would be written rather than a second opinion about it. The
+Neo4j mode is the check that the writing actually happened.
 
 Usage:
     python3 -m eval.graph_health --index index/all_code_blocks.json
@@ -30,7 +30,7 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from genai_stack.code_index import resolve_import
+from genai_stack.code_index import CallResolver, resolve_import
 
 # Kinds that carry no call edges by construction, so their reachability depends
 # entirely on the type edges that do not exist yet.
@@ -62,6 +62,7 @@ class HealthReport:
     # nothing - once imported, a dropped call leaves no trace in the graph.
     call_sites: int | None = None
     resolved_local: int | None = None
+    resolved_import: int | None = None
     resolved_global: int | None = None
     dropped_ambiguous: int | None = None
     dropped_external: int | None = None
@@ -93,14 +94,21 @@ class HealthReport:
         """Call sites naming something defined inside the repo."""
         if self.call_sites is None:
             return None
-        return self.resolved_local + self.resolved_global + self.dropped_ambiguous
+        return (
+            self.resolved_local
+            + self.resolved_import
+            + self.resolved_global
+            + self.dropped_ambiguous
+        )
 
     @property
     def resolution_rate(self) -> float | None:
         resolvable = self.resolvable_call_sites
         if not resolvable:
             return None
-        return (self.resolved_local + self.resolved_global) / resolvable
+        return (
+            self.resolved_local + self.resolved_import + self.resolved_global
+        ) / resolvable
 
 
 def _percentile(values: list[int], fraction: float) -> int:
@@ -121,16 +129,12 @@ def _degree_stats(report: HealthReport, in_degrees: list[int]) -> None:
 
 
 def from_index(index: dict) -> HealthReport:
-    """Metrics computed from the extractor's JSON, without touching Neo4j.
-
-    The call classification mirrors LOCAL_CALLS_QUERY and GLOBAL_CALLS_QUERY in
-    ingest.py: a definition in the same file wins, otherwise the name has to be
-    unique across the whole graph, otherwise the call is dropped.
-    """
+    """Metrics computed from the extractor's JSON, without touching Neo4j."""
     report = HealthReport(source="index")
     files = index.get("files", [])
     report.files = len(files)
 
+    files_by_path = {f["path"]: f for f in files}
     by_name: Counter = Counter()
     in_file: set[tuple[str, str]] = set()
     for record in files:
@@ -146,7 +150,11 @@ def from_index(index: dict) -> HealthReport:
         1 for f in files for s in f.get("symbols", []) if s.get("doc")
     )
 
-    local = global_unique = ambiguous = external = 0
+    # The real resolver, not a copy of it. An earlier version of this reported
+    # a classification that mirrored the Cypher in ingest.py, which meant the
+    # instrument could quietly disagree with the thing it was measuring.
+    resolver = CallResolver(index)
+    local = via_import = global_unique = ambiguous = external = 0
     edges = 0
     in_degree: Counter = Counter()
     has_out: set[str] = set()
@@ -155,31 +163,41 @@ def from_index(index: dict) -> HealthReport:
         path = record["path"]
         for symbol in record.get("symbols", []):
             for callee in symbol.get("calls", []):
-                if (path, callee) in in_file:
+                target = resolver.resolve(path, callee)
+                if target is None:
+                    if by_name.get(callee, 0) > 1:
+                        ambiguous += 1
+                    else:
+                        external += 1
+                    continue
+
+                if target == path:
                     local += 1
-                    # A local match links every same-named symbol in the file,
-                    # so one call site can produce more than one edge.
+                elif target == "*":
+                    global_unique += 1
+                else:
+                    via_import += 1
+
+                # The loader matches the callee by name within the resolved
+                # file, so one call site links every same-named symbol there.
+                if target == "*":
+                    targets = 1
+                    key = ("*", callee)
+                else:
                     targets = sum(
                         1
-                        for other in record["symbols"]
+                        for other in files_by_path[target].get("symbols", [])
                         if other["name"] == callee and other["id"] != symbol["id"]
                     )
-                    edges += targets
-                    if targets:
-                        has_out.add(symbol["id"])
-                    in_degree[(path, callee)] += targets
-                elif by_name.get(callee, 0) == 1:
-                    global_unique += 1
-                    edges += 1
+                    key = (target, callee)
+                edges += targets
+                if targets:
                     has_out.add(symbol["id"])
-                    in_degree[("*", callee)] += 1
-                elif by_name.get(callee, 0) > 1:
-                    ambiguous += 1
-                else:
-                    external += 1
+                in_degree[key] += targets
 
-    report.call_sites = local + global_unique + ambiguous + external
+    report.call_sites = local + via_import + global_unique + ambiguous + external
     report.resolved_local = local
+    report.resolved_import = via_import
     report.resolved_global = global_unique
     report.dropped_ambiguous = ambiguous
     report.dropped_external = external
@@ -327,7 +345,8 @@ def format_report(report: HealthReport) -> str:
     if report.call_sites is not None:
         out.append(_line("call sites", report.call_sites))
         out.append(_line("  resolved in-file", report.resolved_local, report.call_sites))
-        out.append(_line("  resolved globally unique", report.resolved_global, report.call_sites))
+        out.append(_line("  resolved via an import", report.resolved_import, report.call_sites))
+        out.append(_line("  guessed by unique name", report.resolved_global, report.call_sites))
         out.append(_line("  DROPPED ambiguous", report.dropped_ambiguous, report.call_sites))
         out.append(_line("  external / unknown", report.dropped_external, report.call_sites))
         rate = report.resolution_rate
