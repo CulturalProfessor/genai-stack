@@ -274,3 +274,43 @@ def test_files_without_symbols_still_get_a_row():
     }
     assert [row["path"] for row in iter_file_rows(index)] == ["a.ts"]
     assert list(iter_rows(index)) == []
+
+
+PACKAGES = {
+    "@scope/utils": "packages/scope-utils",
+    "@scope/utils-common": "packages/scope-utils-common",
+}
+
+
+def test_a_workspace_package_resolves_to_its_source_entry_point():
+    known = {"packages/scope-utils/src/index.ts"}
+    assert (
+        resolve_import("app/main.ts", "@scope/utils", known, PACKAGES)
+        == "packages/scope-utils/src/index.ts"
+    )
+
+
+def test_a_subpath_of_a_workspace_package_resolves():
+    known = {"packages/scope-utils/src/paths.ts"}
+    assert (
+        resolve_import("app/main.ts", "@scope/utils/paths", known, PACKAGES)
+        == "packages/scope-utils/src/paths.ts"
+    )
+
+
+def test_the_longest_package_name_wins():
+    """`@scope/utils-common` must not be swallowed by `@scope/utils`."""
+    known = {"packages/scope-utils-common/src/index.ts"}
+    assert (
+        resolve_import("app/main.ts", "@scope/utils-common", known, PACKAGES)
+        == "packages/scope-utils-common/src/index.ts"
+    )
+
+
+def test_an_external_package_stays_unresolved():
+    assert resolve_import("app/main.ts", "react", {"react.ts"}, PACKAGES) is None
+
+
+def test_without_a_package_map_bare_specifiers_are_left_alone():
+    known = {"packages/scope-utils/src/index.ts"}
+    assert resolve_import("app/main.ts", "@scope/utils", known) is None

@@ -618,6 +618,30 @@ def extract_interface(source: bytes, language: str) -> ModuleInterface:
     return extract_module_interface(tree.root_node, source)
 
 
+def find_workspace_packages(repo: Path, ignore_dirs: set[str]) -> dict[str, str]:
+    """Map each package.json `name` to the directory holding it.
+
+    In a monorepo a bare specifier is as likely to name a sibling package as an
+    external dependency, and those cross-package imports are the ones that
+    describe the architecture. Without this they all resolve to nothing.
+    """
+    packages: dict[str, str] = {}
+    for root, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+        if "package.json" not in filenames:
+            continue
+        try:
+            name = json.loads(
+                (Path(root) / "package.json").read_text(encoding="utf-8")
+            ).get("name")
+        except (OSError, ValueError) as exc:
+            logger.debug("Skipping %s/package.json: %s", root, exc)
+            continue
+        if name:
+            packages[name] = Path(root).relative_to(repo).as_posix()
+    return packages
+
+
 def build_index(
     repo: Path,
     ignore_dirs: set[str],
@@ -673,15 +697,17 @@ def build_payload(
     Shared by the CLI and the loader UI so both produce an identical index.
     """
     repo = Path(repo)
+    skipped_dirs = set(DEFAULT_IGNORE_DIRS) | set(ignore_dirs or ())
     records = build_index(
         repo,
-        set(DEFAULT_IGNORE_DIRS) | set(ignore_dirs or ()),
+        skipped_dirs,
         DEFAULT_IGNORE_GLOBS + list(ignore_globs or ()),
         max_chars,
         min_chars,
     )
     payload: dict = {
         "repo": repo_name or repo.name,
+        "packages": find_workspace_packages(repo, skipped_dirs),
         "files": [asdict(record) for record in records],
     }
     if source_url:

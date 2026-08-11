@@ -93,13 +93,76 @@ def iter_rows(index: dict) -> Iterator[dict]:
             }
 
 
-def resolve_import(from_path: str, specifier: str, known_paths: set[str]) -> str | None:
-    """Resolve a relative import to a file in the index, or None.
+def _candidates(base: str, known_paths: set[str]) -> str | None:
+    """First of the extension and index-file spellings of `base` that exists."""
+    candidates = [base + suffix for suffix in IMPORT_SUFFIXES]
 
-    Bare specifiers (`meteor/accounts-base`, `react`) are external packages and
-    are deliberately not resolved - only edges inside the indexed repo are useful.
+    # `./delay.js` -> `delay.ts`, the TypeScript ESM convention.
+    for js_ext, ts_exts in JS_TO_TS_EXTENSIONS.items():
+        if base.endswith(js_ext):
+            stem = base[: -len(js_ext)]
+            candidates += [stem + ts_ext for ts_ext in ts_exts]
+            break
+
+    candidates += [f"{base}/index{suffix}" for suffix in IMPORT_SUFFIXES if suffix]
+    for candidate in candidates:
+        if candidate in known_paths:
+            return candidate
+    return None
+
+
+def resolve_package_import(
+    specifier: str, packages: dict[str, str], known_paths: set[str]
+) -> str | None:
+    """Resolve `@scope/pkg/sub` against the workspace packages of a monorepo.
+
+    A bare specifier usually names an external dependency, but in a monorepo it
+    just as often names a sibling package - and those are the edges that
+    describe the architecture. Docusaurus imports `@docusaurus/utils` 97 times
+    and every one of them resolved to nothing.
+    """
+    # Longest match, so `@x/utils-common` is not swallowed by `@x/utils`.
+    name = max(
+        (n for n in packages if specifier == n or specifier.startswith(n + "/")),
+        key=len,
+        default=None,
+    )
+    if name is None:
+        return None
+
+    directory = packages[name].rstrip("/")
+    subpath = specifier[len(name) :].lstrip("/")
+    if subpath:
+        # `src/` first: a package's published subpath names the built layout,
+        # and the source that mirrors it is what got indexed.
+        for base in (f"{directory}/src/{subpath}", f"{directory}/{subpath}"):
+            found = _candidates(base, known_paths)
+            if found:
+                return found
+        return None
+
+    for base in (f"{directory}/src/index", f"{directory}/index", f"{directory}/src"):
+        found = _candidates(base, known_paths)
+        if found:
+            return found
+    return None
+
+
+def resolve_import(
+    from_path: str,
+    specifier: str,
+    known_paths: set[str],
+    packages: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve an import to a file in the index, or None.
+
+    Bare specifiers naming an external package (`react`) stay unresolved - only
+    edges inside the indexed repo are useful - but one naming a workspace
+    package is internal and does resolve.
     """
     if not specifier.startswith("."):
+        if packages:
+            return resolve_package_import(specifier, packages, known_paths)
         return None
     try:
         base = (PurePosixPath(from_path).parent / specifier).as_posix()
@@ -115,32 +178,18 @@ def resolve_import(from_path: str, specifier: str, known_paths: set[str]) -> str
                 parts.pop()
             continue
         parts.append(part)
-    resolved = "/".join(parts)
-
-    candidates = [resolved + suffix for suffix in IMPORT_SUFFIXES]
-
-    # `./delay.js` -> `delay.ts`, the TypeScript ESM convention.
-    for js_ext, ts_exts in JS_TO_TS_EXTENSIONS.items():
-        if resolved.endswith(js_ext):
-            stem = resolved[: -len(js_ext)]
-            candidates += [stem + ts_ext for ts_ext in ts_exts]
-            break
-
-    candidates += [f"{resolved}/index{suffix}" for suffix in IMPORT_SUFFIXES if suffix]
-    for candidate in candidates:
-        if candidate in known_paths:
-            return candidate
-    return None
+    return _candidates("/".join(parts), known_paths)
 
 
 def iter_import_edges(index: dict) -> Iterator[dict]:
     """File-to-file edges for imports that point inside the indexed repo."""
     known_paths = {f["path"] for f in index.get("files", [])}
+    packages = index.get("packages") or {}
     for file_record in index.get("files", []):
         from_path = file_record["path"]
         seen: set[str] = set()
         for specifier in file_record.get("imports", []):
-            to_path = resolve_import(from_path, specifier, known_paths)
+            to_path = resolve_import(from_path, specifier, known_paths, packages)
             if to_path and to_path != from_path and to_path not in seen:
                 seen.add(to_path)
                 yield {"from_path": from_path, "to_path": to_path}

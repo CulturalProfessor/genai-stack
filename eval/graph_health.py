@@ -74,6 +74,8 @@ class HealthReport:
     code_imports: int | None = None
     dangling_code_imports: int | None = None
     asset_imports: int | None = None
+    # Bare specifiers that turned out to name a package of this monorepo.
+    package_imports: int | None = None
 
     isolated_symbols: int = 0
     type_symbols: int = 0
@@ -184,17 +186,27 @@ def from_index(index: dict) -> HealthReport:
     report.call_edges = edges
 
     known_paths = {f["path"] for f in files}
-    code_imports = dangling = assets = 0
+    packages = index.get("packages") or {}
+    code_imports = dangling = assets = package_imports = 0
     import_pairs: set[tuple[str, str]] = set()
     for record in files:
         for specifier in record.get("imports", []):
             if not specifier.startswith("."):
+                # Bare, so external unless it names a package of this monorepo.
+                target = resolve_import(
+                    record["path"], specifier, known_paths, packages
+                )
+                if target is None:
+                    continue
+                package_imports += 1
+                if target != record["path"]:
+                    import_pairs.add((record["path"], target))
                 continue
             if PurePosixPath(specifier).suffix in ASSET_SUFFIXES:
                 assets += 1
                 continue
             code_imports += 1
-            target = resolve_import(record["path"], specifier, known_paths)
+            target = resolve_import(record["path"], specifier, known_paths, packages)
             if target is None:
                 # Almost always a module the extractor produced no symbols for:
                 # build_index drops a file with an empty symbol list, and
@@ -207,6 +219,7 @@ def from_index(index: dict) -> HealthReport:
     report.code_imports = code_imports
     report.dangling_code_imports = dangling
     report.asset_imports = assets
+    report.package_imports = package_imports
     report.import_edges = len(import_pairs)
 
     isolated = 0
@@ -336,6 +349,7 @@ def format_report(report: HealthReport) -> str:
                 report.code_imports,
             )
         )
+        out.append(_line("workspace package imports", report.package_imports))
         out.append(_line("relative asset imports (not edges)", report.asset_imports))
     out.append("")
 
