@@ -36,8 +36,8 @@ def file_record(path, symbols, imports=()):
 
 
 def test_call_sites_are_classified_the_way_the_import_does():
-    """Mirrors LOCAL_CALLS_QUERY and GLOBAL_CALLS_QUERY: same file wins, then a
-    globally unique name, and anything else is dropped."""
+    """Same file wins, then a name unique across the index; with no import
+    binding to go on, anything else is dropped."""
     index = {
         "files": [
             file_record("a.ts", [symbol("caller", ["helper", "unique", "shared", "fetch"]),
