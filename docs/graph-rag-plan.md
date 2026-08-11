@@ -335,7 +335,28 @@ drop. Then Phase 2 coverage on `trace` and `impact` categories.
 
 ---
 
-## Phase 4 — Type edges, heritage, `INSTANTIATES`
+## Phase 4 — Type edges, heritage, `INSTANTIATES` — **done**
+
+| | before | after |
+|---|---|---|
+| type/interface symbols reachable | 0.1% | **80.7%** |
+| isolated symbols | 54.4% | **27.4%** |
+| intra-repo call resolution | 79.7% | **85.9%** |
+| REFERENCES_TYPE edges | — | 2,116 |
+| INSTANTIATES edges | — | 24 |
+
+**F6. A latent bug this uncovered, which predates Phase 4.** The loader matched a callee
+by *name within a file*, so one reference linked every same-named symbol there.
+`theme-classic.d.ts` declares `Props` 215 times in separate `declare module` blocks, and
+type references made it visible: 3,213 reference records fanned out into **54,940 edges**,
+with in-degree p95 and max both 323. Resolution now yields an exact symbol id — a single
+exported definition settles the common case, and where it cannot, the edge is dropped
+rather than multiplied. In-degree max fell to 60, p95 to 7, and super-nodes from 175
+absorbing 2764% of edges to 13 absorbing 10%.
+
+`OVERRIDES` is still outstanding.
+
+## Phase 4 (original plan) — Type edges, heritage, `INSTANTIATES`
 
 Makes the 890 type/interface nodes (28% of the graph) traversable instead of dead ends.
 
