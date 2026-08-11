@@ -11,6 +11,8 @@ all_code_blocks.json
 __pycache__/
 *.pyc
 .pytest_cache/
+# Cached embedding vectors, keyed by text and model. Rebuildable, and large.
+.cache/
 # The web image installs its own; a local install is only for typechecking
 # and editor tooling.
 node_modules/

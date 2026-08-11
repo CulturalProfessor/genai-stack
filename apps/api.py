@@ -21,6 +21,7 @@ from sse_starlette.sse import EventSourceResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from genai_stack import embedding_cache
 from genai_stack.chains import (
     answer_question,
     configure_llm_only_chain,
@@ -68,6 +69,16 @@ llm_name = settings.llm
 
 embeddings, dimension = load_embedding_model(
     settings.embedding_model, config=settings.embedding_config, logger=BaseLogger()
+)
+# Re-importing a repository re-embeds every symbol it contains. Most of them are
+# unchanged between two imports, so the cache turns a re-index into roughly the
+# cost of the symbols that actually moved.
+embeddings = embedding_cache.wrap(
+    embeddings,
+    model_name=settings.embedding_model,
+    dimension=dimension,
+    path=settings.embedding_cache_path,
+    enabled=settings.embedding_cache,
 )
 
 # if Neo4j is local, you can go to http://localhost:7474/ to browse the database
@@ -509,6 +520,14 @@ async def import_index_file(file: UploadFile = File(...)):
         embeddings=embeddings,
         batch_size=settings.import_batch_size,
     )
+    if isinstance(embeddings, embedding_cache.CachedEmbeddings):
+        stats = embeddings.stats()
+        logger.info(
+            "Embedding cache: %d hits, %d misses (%.0f%%)",
+            stats["hits"],
+            stats["misses"],
+            stats["hit_rate"] * 100,
+        )
     record_import(neo4j_graph, index, imported)
     return {
         "imported": imported,

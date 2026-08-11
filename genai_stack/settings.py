@@ -20,6 +20,8 @@ class Settings:
     allowed_origins: list[str] = field(default_factory=list)
     rate_limit_requests: int = 30
     rate_limit_window_seconds: int = 60
+    embedding_cache: bool = True
+    embedding_cache_path: str | None = None
 
     @property
     def embedding_config(self) -> dict:
@@ -55,4 +57,9 @@ def load_settings() -> Settings:
         ),
         rate_limit_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "30")),
         rate_limit_window_seconds=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")),
+        # On by default: re-importing the same repository is the normal case
+        # while the extractor is being worked on, and a stale entry is not
+        # reachable - the key covers the text and the model.
+        embedding_cache=os.getenv("EMBEDDING_CACHE", "1") not in ("0", "false", "False"),
+        embedding_cache_path=os.getenv("EMBEDDING_CACHE_PATH"),
     )
