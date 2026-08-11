@@ -87,6 +87,52 @@ numbers above are JSON-mode only and have not yet been checked against the datab
 
 **Exit:** report runs in both modes, numbers agree within a rounding margin.
 
+### Phase 0 findings (done)
+
+Running it turned up three things the earlier read had missed.
+
+**F1. Barrels and constant modules are invisible, so 12.4% of code imports dangle.**
+`build_index` only emits a `FileRecord` when the file yielded symbols
+([extract.py:427](../genai_stack/extract.py)), and `visit_declaration` only records a
+`const` whose value is a function ([extract.py:367](../genai_stack/extract.py)). A module
+of plain constants, or a barrel that only re-exports, therefore never becomes a node —
+and every import naming one dangles. Confirmed absent from the index:
+`client/exports/ExecutionEnvironment`, `client/common`, `ssg/ssgEnv`,
+`commands/build/build`, `docusaurus-theme-common/src/index`.
+
+This is a **prerequisite for Phase 3**, not a separate nicety: import-scoped call
+resolution walks *to the imported module's exports*, and if the module is not a node
+the walk falls straight through to the global-unique rule it was meant to replace.
+Barrels are how a monorepo exposes its packages, so this bites hardest exactly where
+cross-package structure lives. Phase 3 also needs re-export following
+(`export * from './x'`, `export { a } from './x'`).
+
+**F2. The graph cannot tell repositories apart.** `Repository` has **zero
+relationships** — verified on a live database holding four repos. Two consequences:
+
+- File paths are repo-relative and `file_path` is globally unique, so the same path in
+  two repos merges into one node. Measured: 70 indexed file records → 67 `File` nodes.
+- `GLOBAL_CALLS_QUERY`'s "unique across the whole graph" test ranges over *every repo
+  ever imported*. A name unique within one repo but present in another is classified
+  ambiguous and dropped, so **resolution quality degrades as more repos are added** —
+  the graph gets worse with more data.
+
+`schema.py` documents the absent ownership edge as deliberate ("a File is not owned by
+one repository") to let edges resolve across the whole graph. The cross-repo merging
+looks like an unintended consequence of that choice rather than the intent. Needs a
+decision: scope resolution per repository (add `(:Repository)-[:CONTAINS]->(:File)` and
+qualify paths), or keep the global namespace and accept the degradation. Phase 3 fixes
+the call half incidentally by scoping through imports; the node-merging half is separate.
+
+**F3. The 54% isolation figure is not a Docusaurus artefact.** The live database holds
+four unrelated small repos (ky, p-limit, p-map, inventory-system) and reports 54.9%
+isolated against the index's 54.4% — independent corpora, same number.
+
+**Not yet done:** index mode and Neo4j mode have not been run against the *same*
+corpus, so the reimplementation of `ingest.py`'s resolution rules is unverified. That
+needs a Docusaurus import into a database, which mutates whatever is loaded — worth
+doing against a throwaway instance rather than the working one.
+
 ---
 
 ## Phase 1 — Data-loss fixes
@@ -219,6 +265,10 @@ of being the sole candidate.
 
 **Files:** `extract.py`, `code_index.py`, `ingest.py`, `schema.py`
 
+0. **Prerequisite (F1).** Emit a `FileRecord` for every parsed file, symbols or not, so
+   imports have somewhere to land; record non-function `const` exports; follow
+   re-exports through barrels. Without this, steps 1–3 fall through for 12.4% of
+   internal imports.
 1. `extract_imports` ([extract.py:248](../genai_stack/extract.py)) currently keeps only the
    module string. Record bindings instead:
    `{specifier, names: [{imported, local}], default_local, namespace_local}`.
