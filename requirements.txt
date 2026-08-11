@@ -1,16 +1,39 @@
-openai
-python-dotenv
-wikipedia
-tiktoken
-neo4j
-streamlit
-sentence_transformers==2.2.2
-Pillow
-fastapi
-PyPDF2
-torch==2.0.1
-pydantic
-uvicorn
-sse-starlette
-boto3
-chardet
+# Pinned so builds are reproducible. Previously these floated and the base
+# image supplied langchain implicitly.
+
+# LangChain stays on the 0.3 line: RetrievalQAWithSourcesChain and
+# load_qa_with_sources_chain used by chains.py were removed in LangChain 1.x.
+langchain==0.3.30
+langchain-core==0.3.86
+langchain-community==0.3.31
+langchain-openai==0.3.35
+langchain-neo4j==0.5.0
+langchain-text-splitters==0.3.11
+
+neo4j==5.28.4
+openai==2.53.0
+tiktoken==0.13.0
+boto3==1.40.30          # required by the Bedrock LLM/embedding options
+python-dotenv==1.2.2
+pydantic==2.13.4
+
+# Embedding model for EMBEDDING_MODEL=sentence_transformer.
+# CPU-only torch: the default PyPI wheel is 767MB and drags in ~2GB of nvidia-*
+# CUDA packages that nothing here uses. The +cpu build is 179MB with no CUDA
+# dependencies. Drop the extra index and the +cpu suffix if you want GPU builds.
+--extra-index-url https://download.pytorch.org/whl/cpu
+sentence-transformers==3.4.1
+torch==2.6.0+cpu
+
+# Code extraction (fs.py)
+tree-sitter==0.25.2
+tree-sitter-typescript==0.23.2
+tree-sitter-javascript==0.25.0
+
+# Apps
+fastapi==0.141.1
+uvicorn==0.38.0
+sse-starlette==3.4.8
+# FastAPI needs this to accept a file upload; it is not a fastapi dependency.
+python-multipart==0.0.20
+pypdf==6.1.1

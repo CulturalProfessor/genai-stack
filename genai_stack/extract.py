@@ -1,0 +1,903 @@
+"""Extract code symbols from a TS/JS repository into JSON for the loader.
+
+Walks a repository with tree-sitter and emits one record per file listing the
+functions, methods, classes and type declarations it contains. The output feeds
+``loader.py``, which embeds each symbol and writes it to Neo4j.
+
+Usage:
+    python3 fs.py --repo ../Rocket.Chat --output all_code_blocks.json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Iterator
+
+import tree_sitter_javascript
+import tree_sitter_typescript
+from tree_sitter import Language, Node, Parser
+
+logger = logging.getLogger("fs")
+
+# Directory names skipped anywhere in the tree, and glob patterns matched
+# against the repo-relative path.
+DEFAULT_IGNORE_DIRS = [
+    ".cache",
+    ".changeset",
+    ".git",
+    ".github",
+    ".husky",
+    ".meteor",
+    ".next",
+    ".storybook",
+    ".vscode",
+    ".yarn",
+    "__snapshots__",
+    "assets",
+    "build",
+    "coverage",
+    "dist",
+    "i18n",
+    "node_modules",
+    "out",
+    "public",
+]
+DEFAULT_IGNORE_GLOBS = ["*.min.js", "*.bundle.js", "*.test.*", "*.spec.*"]
+
+# tree-sitter grammar to use per file extension.
+LANGUAGE_BY_SUFFIX = {
+    ".ts": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".jsx": "javascript",
+}
+
+# Node types that define a symbol worth embedding on its own.
+FUNCTION_NODES = {
+    "function_declaration",
+    "function_signature",
+    "generator_function_declaration",
+}
+CLASS_NODES = {"class_declaration", "abstract_class_declaration"}
+TYPE_NODES = {"interface_declaration", "type_alias_declaration", "enum_declaration"}
+DECLARATION_NODES = {"lexical_declaration", "variable_declaration"}
+MEMBER_NODES = {
+    "abstract_method_signature",
+    "method_definition",
+    "method_signature",
+    "public_field_definition",
+}
+FUNCTION_VALUE_NODES = {"arrow_function", "function", "function_expression"}
+CALL_NODES = {"call_expression", "new_expression"}
+# Wrappers a declaration can sit inside without its doc comment moving with it.
+# The comment is written above the outermost of these, not above the
+# declaration that `visit` eventually records.
+DOC_WRAPPER_NODES = {
+    "ambient_declaration",
+    "export_statement",
+    "lexical_declaration",
+    "variable_declaration",
+}
+# Bodies that can be reduced to a member list.
+TYPE_BODY_NODES = {"interface_body", "object_type", "enum_body"}
+
+_PARSERS: dict[str, Parser] = {}
+
+
+def get_parser(language: str) -> Parser:
+    """Return a cached parser for one of the grammars in LANGUAGE_BY_SUFFIX."""
+    if language not in _PARSERS:
+        if language == "typescript":
+            grammar = tree_sitter_typescript.language_typescript()
+        elif language == "tsx":
+            grammar = tree_sitter_typescript.language_tsx()
+        elif language == "javascript":
+            grammar = tree_sitter_javascript.language()
+        else:
+            raise ValueError(f"Unsupported language: {language}")
+        _PARSERS[language] = Parser(Language(grammar))
+    return _PARSERS[language]
+
+
+@dataclass
+class Symbol:
+    """One embeddable unit of code."""
+
+    id: str
+    name: str
+    qualified_name: str
+    kind: str
+    parent: str | None
+    start_line: int
+    end_line: int
+    signature: str
+    code: str
+    # The comment written above the declaration, kept out of `code` so the
+    # returned text stays exactly what the file contains.
+    doc: str | None = None
+    truncated: bool = False
+    # Whether the file exposes this symbol. Only an exported symbol can be the
+    # target of an import, so this is what scopes call resolution.
+    exported: bool = False
+    # Names invoked inside this symbol. The loader turns these into CALLS
+    # relationships so retrieval can walk from a symbol to what it uses.
+    calls: list[str] = field(default_factory=list)
+    instantiates: list[str] = field(default_factory=list)
+    # Type names in the signature, and the class hierarchy for a class.
+    type_names: list[str] = field(default_factory=list)
+    extends: list[str] = field(default_factory=list)
+    implements: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FileRecord:
+    path: str
+    name: str
+    language: str
+    depth: int
+    symbols: list[Symbol] = field(default_factory=list)
+    # Raw module specifiers; the loader resolves the relative ones to files.
+    imports: list[str] = field(default_factory=list)
+    # Kept beside `imports` rather than replacing it: the two answer different
+    # questions - which files this one depends on, and which name came from
+    # which of them - and only the second is needed to resolve a call.
+    bindings: list[dict] = field(default_factory=list)
+    re_exports: list[dict] = field(default_factory=list)
+
+
+def is_ignored(rel_path: Path, ignore_dirs: set[str], ignore_globs: list[str]) -> bool:
+    if any(part in ignore_dirs for part in rel_path.parts):
+        return True
+    return any(rel_path.match(pattern) for pattern in ignore_globs)
+
+
+def iter_source_files(
+    repo: Path, ignore_dirs: set[str], ignore_globs: list[str]
+) -> Iterator[tuple[Path, str]]:
+    """Yield (absolute path, language) for every parseable file under repo."""
+    for root, dirnames, filenames in os.walk(repo):
+        # Pruning in place stops os.walk from descending into ignored trees.
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+        for filename in sorted(filenames):
+            language = LANGUAGE_BY_SUFFIX.get(Path(filename).suffix)
+            if language is None:
+                continue
+            path = Path(root) / filename
+            if is_ignored(path.relative_to(repo), ignore_dirs, ignore_globs):
+                continue
+            yield path, language
+
+
+def node_text(node: Node, source: bytes) -> str:
+    return source[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def node_name(node: Node, source: bytes) -> str | None:
+    name = node.child_by_field_name("name")
+    return node_text(name, source) if name is not None else None
+
+
+def doc_comment(node: Node, source: bytes, max_chars: int = 1200) -> str | None:
+    """The comment written directly above a declaration, if there is one.
+
+    This is the only natural language sitting next to a symbol, and it is
+    phrased the way a question about that symbol gets phrased - which makes it
+    worth more per character than the code it describes.
+
+    tree-sitter makes a leading comment a *sibling* of the declaration rather
+    than a child, and `visit` unwraps `export function foo()` down to the inner
+    function_declaration, so the comment is a sibling of a node one or two
+    levels up. Walk back out to the outermost wrapper before looking for it.
+    """
+    outer = node
+    while (
+        outer.parent is not None
+        and outer.parent.type in DOC_WRAPPER_NODES
+        and outer.parent.named_children
+        and outer.parent.named_children[0].id == outer.id
+    ):
+        outer = outer.parent
+
+    # Consecutive `//` lines are one comment node each, so collect backwards.
+    lines: list[str] = []
+    previous = outer.prev_named_sibling
+    while previous is not None and previous.type == "comment":
+        # A blank line in between means the comment belongs to the file, or to
+        # whatever preceded it - not to this symbol. Without this check every
+        # file-header banner gets attached to the first declaration below it.
+        if outer.start_point[0] - previous.end_point[0] > 1:
+            break
+        lines.insert(0, node_text(previous, source))
+        outer, previous = previous, previous.prev_named_sibling
+
+    if not lines:
+        return None
+    # Anything this long is a licence header or a commented-out block, not a
+    # description, and embedding it would drown the symbol it sits above.
+    text = "\n".join(lines)
+    return text if len(text) <= max_chars else None
+
+
+def signature_of(node: Node, source: bytes) -> str:
+    """The declaration line(s) up to the body, e.g. ``function foo(a: number)``."""
+    body = node.child_by_field_name("body")
+    if body is None:
+        # `const foo = () => {...}`: the body hangs off the assigned function.
+        value = node.child_by_field_name("value")
+        if value is not None:
+            body = value.child_by_field_name("body")
+    end = body.start_byte if body is not None else node.end_byte
+    text = source[node.start_byte : end].decode("utf-8", errors="replace")
+    return " ".join(text.split()).rstrip("{").strip()
+
+
+def type_skeleton(node: Node, source: bytes, max_members: int = 40) -> str:
+    """An interface/type/enum reduced to its members, without the doc comments.
+
+    Type declarations are often mostly JSDoc explaining behaviour. Embedded
+    whole, they out-score the code that implements that behaviour on exactly
+    the questions users ask - and a type node has no CALLS edges, so a hit on
+    one contributes nothing for the graph to traverse.
+    """
+    body = node.child_by_field_name("body") or node.child_by_field_name("value")
+    if body is None or body.type not in TYPE_BODY_NODES:
+        # Unions, function types and other short forms: keep them whole,
+        # collapsed onto one line.
+        return " ".join(node_text(node, source).split())
+
+    header = source[node.start_byte : body.start_byte].decode("utf-8", errors="replace")
+    lines = [" ".join(header.split()) + " {"]
+    members = [m for m in body.named_children if m.type != "comment"]
+    for member in members[:max_members]:
+        lines.append("    " + " ".join(node_text(member, source).split()))
+    if len(members) > max_members:
+        lines.append(f"    // ... {len(members) - max_members} more members")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def class_skeleton(node: Node, source: bytes) -> str:
+    """A class header plus its member signatures, without the member bodies.
+
+    Each method is embedded as its own symbol, so embedding the full class text
+    too would just duplicate that content in the vector store.
+    """
+    lines = [signature_of(node, source) + " {"]
+    body = node.child_by_field_name("body")
+    if body is not None:
+        for member in body.named_children:
+            if member.type in MEMBER_NODES:
+                lines.append("    " + signature_of(member, source))
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def callee_name(node: Node | None, source: bytes) -> str | None:
+    """The name being invoked: `foo()` -> foo, `this.foo()`/`a.b.foo()` -> foo."""
+    if node is None:
+        return None
+    if node.type == "identifier":
+        return node_text(node, source)
+    if node.type == "member_expression":
+        prop = node.child_by_field_name("property")
+        return node_text(prop, source) if prop is not None else None
+    return None
+
+
+def collect_references(
+    node: Node, source: bytes, exclude: str | None
+) -> tuple[list[str], list[str]]:
+    """(called, instantiated) names invoked anywhere inside `node`.
+
+    Kept apart because they answer different questions - what this code does
+    versus what it builds - and folding `new Foo()` in with `foo()` made both
+    harder to follow from a hit.
+    """
+    called: set[str] = set()
+    built: set[str] = set()
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type in CALL_NODES:
+            target = current.child_by_field_name(
+                "function"
+            ) or current.child_by_field_name("constructor")
+            name = callee_name(target, source)
+            # Self-recursion would only add a self-loop to the graph.
+            if name and name != exclude:
+                (built if current.type == "new_expression" else called).add(name)
+        stack.extend(current.named_children)
+    return sorted(called), sorted(built)
+
+
+def collect_calls(node: Node, source: bytes, exclude: str | None) -> list[str]:
+    return collect_references(node, source, exclude)[0]
+
+
+def collect_type_names(node: Node, source: bytes) -> list[str]:
+    """Type names in a declaration's signature, ignoring its body.
+
+    A type node has no calls of its own, so without these it is a dead end:
+    890 of Docusaurus's 3163 symbols are interfaces and type aliases, and a
+    vector hit on one had nothing for the graph to traverse. Walking the
+    signature links them to the code that takes or returns them.
+    """
+    names: set[str] = set()
+    stack = [
+        child
+        for child in node.named_children
+        # The body's local annotations describe the implementation, not the
+        # interface, and pull in far more than the signature does.
+        if child.type not in {"statement_block", "class_body"}
+    ]
+    while stack:
+        current = stack.pop()
+        if current.type == "type_identifier":
+            names.add(node_text(current, source))
+        stack.extend(current.named_children)
+    return sorted(names)
+
+
+def collect_heritage(node: Node, source: bytes) -> tuple[list[str], list[str]]:
+    """(extends, implements) for a class declaration."""
+    extends: list[str] = []
+    implements: list[str] = []
+    for child in node.named_children:
+        if child.type != "class_heritage":
+            continue
+        for clause in child.named_children:
+            target = extends if clause.type == "extends_clause" else implements
+            target.extend(
+                node_text(item, source)
+                for item in clause.named_children
+                if item.type in {"identifier", "type_identifier"}
+            )
+    return extends, implements
+
+
+def extract_imports(root: Node, source: bytes) -> list[str]:
+    """Module specifiers pulled in by this file, from `import` and `require`."""
+    specifiers: set[str] = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current.type in {"import_statement", "export_statement"}:
+            source_node = current.child_by_field_name("source")
+            if source_node is not None:
+                specifiers.add(node_text(source_node, source).strip("'\"`"))
+        elif current.type == "call_expression":
+            target = current.child_by_field_name("function")
+            if target is not None and node_text(target, source) == "require":
+                args = current.child_by_field_name("arguments")
+                if args is not None and args.named_children:
+                    first = args.named_children[0]
+                    if first.type == "string":
+                        specifiers.add(node_text(first, source).strip("'\"`"))
+        stack.extend(current.named_children)
+    return sorted(specifiers)
+
+
+@dataclass
+class ModuleInterface:
+    """Which local name came from where, and what this file exposes.
+
+    Resolving a call by name alone cannot tell two `handle`s apart. Knowing
+    that *this* file's `handle` is the one imported from `./handlers` picks the
+    right one, and `re_exports` is how that walk gets through a barrel to the
+    file where the name is actually defined.
+    """
+
+    # {local, imported, specifier}. `imported` is "default" for a default
+    # import and "*" for a namespace one.
+    bindings: list[dict] = field(default_factory=list)
+    # {specifier, imported, local}, with "*" for `export * from`.
+    re_exports: list[dict] = field(default_factory=list)
+    # Names this file exposes directly, as opposed to passing through.
+    exported_names: list[str] = field(default_factory=list)
+
+
+def _string_value(node: Node, source: bytes) -> str:
+    return node_text(node, source).strip("'\"`")
+
+
+def _specifier_pair(node: Node, source: bytes) -> tuple[str, str] | None:
+    """(imported, local) for an import_specifier or export_specifier."""
+    name = node.child_by_field_name("name")
+    if name is None:
+        return None
+    alias = node.child_by_field_name("alias")
+    imported = node_text(name, source)
+    return imported, node_text(alias, source) if alias is not None else imported
+
+
+def _declared_names(node: Node, source: bytes) -> list[str]:
+    """The names a declaration introduces, whether or not it is a binding list."""
+    if node.type in DECLARATION_NODES:
+        return [
+            name
+            for child in node.named_children
+            if child.type == "variable_declarator"
+            for name in [node_name(child, source)]
+            if name
+        ]
+    name = node_name(node, source)
+    return [name] if name else []
+
+
+def extract_module_interface(root: Node, source: bytes) -> ModuleInterface:
+    """Walk the import and export statements of one file."""
+    interface = ModuleInterface()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "import_statement":
+            _read_import(node, source, interface)
+        elif node.type == "export_statement":
+            _read_export(node, source, interface)
+        stack.extend(node.named_children)
+    return interface
+
+
+def _read_import(node: Node, source: bytes, interface: ModuleInterface) -> None:
+    source_node = node.child_by_field_name("source")
+    if source_node is None:
+        return
+    specifier = _string_value(source_node, source)
+    for clause in node.named_children:
+        if clause.type != "import_clause":
+            continue
+        for child in clause.named_children:
+            if child.type == "identifier":
+                interface.bindings.append(
+                    {
+                        "local": node_text(child, source),
+                        "imported": "default",
+                        "specifier": specifier,
+                    }
+                )
+            elif child.type == "namespace_import" and child.named_children:
+                interface.bindings.append(
+                    {
+                        "local": node_text(child.named_children[0], source),
+                        "imported": "*",
+                        "specifier": specifier,
+                    }
+                )
+            elif child.type == "named_imports":
+                for item in child.named_children:
+                    pair = _specifier_pair(item, source)
+                    if item.type == "import_specifier" and pair:
+                        imported, local = pair
+                        interface.bindings.append(
+                            {
+                                "local": local,
+                                "imported": imported,
+                                "specifier": specifier,
+                            }
+                        )
+
+
+def _read_export(node: Node, source: bytes, interface: ModuleInterface) -> None:
+    source_node = node.child_by_field_name("source")
+    clause = next(
+        (child for child in node.named_children if child.type == "export_clause"), None
+    )
+
+    if source_node is not None:
+        # `export ... from './x'` - a name this file passes through rather than
+        # defines. Following these is what gets a lookup through a barrel.
+        specifier = _string_value(source_node, source)
+        if clause is None:
+            interface.re_exports.append(
+                {"specifier": specifier, "imported": "*", "local": "*"}
+            )
+            return
+        for item in clause.named_children:
+            pair = _specifier_pair(item, source)
+            if pair:
+                imported, local = pair
+                interface.re_exports.append(
+                    {"specifier": specifier, "imported": imported, "local": local}
+                )
+        return
+
+    if clause is not None:
+        # `export {local, other as alias}` - names declared in this file.
+        for item in clause.named_children:
+            pair = _specifier_pair(item, source)
+            if pair:
+                interface.exported_names.append(pair[1])
+        return
+
+    declaration = node.child_by_field_name("declaration")
+    if declaration is not None:
+        interface.exported_names.extend(_declared_names(declaration, source))
+
+
+class SymbolExtractor:
+    """Collects symbols from one parsed file."""
+
+    def __init__(self, source: bytes, rel_path: str, max_chars: int, min_chars: int):
+        self.source = source
+        self.rel_path = rel_path
+        self.max_chars = max_chars
+        self.min_chars = min_chars
+        self.symbols: list[Symbol] = []
+
+    def add(
+        self,
+        node: Node,
+        name: str | None,
+        kind: str,
+        parent: str | None,
+        code: str | None = None,
+        calls: list[str] | None = None,
+        instantiates: list[str] | None = None,
+    ) -> None:
+        if not name:
+            return
+        code = code if code is not None else node_text(node, self.source)
+        if len(code.strip()) < self.min_chars:
+            return
+        truncated = len(code) > self.max_chars
+        if truncated:
+            code = code[: self.max_chars] + "\n// ... truncated"
+        qualified_name = f"{parent}.{name}" if parent else name
+        start_line = node.start_point[0] + 1
+        found_calls, found_new = collect_references(node, self.source, name)
+        extends, implements = collect_heritage(node, self.source)
+        self.symbols.append(
+            Symbol(
+                # Line number keeps the id unique when a name repeats in a file,
+                # and keeps it stable across runs when the file is unchanged.
+                id=f"{self.rel_path}:{start_line}:{qualified_name}",
+                name=name,
+                qualified_name=qualified_name,
+                kind=kind,
+                parent=parent,
+                start_line=start_line,
+                end_line=node.end_point[0] + 1,
+                signature=signature_of(node, self.source),
+                code=code,
+                doc=doc_comment(node, self.source),
+                truncated=truncated,
+                calls=calls if calls is not None else found_calls,
+                instantiates=instantiates if instantiates is not None else found_new,
+                type_names=collect_type_names(node, self.source),
+                extends=extends,
+                implements=implements,
+            )
+        )
+
+    def visit(self, node: Node, parent: str | None = None) -> None:
+        for child in node.named_children:
+            kind = child.type
+            if kind == "export_statement" or kind == "ambient_declaration":
+                # Unwrap so `export function foo()` is treated as `function foo()`.
+                self.visit(child, parent)
+            elif kind in CLASS_NODES:
+                name = node_name(child, self.source)
+                # calls=[] because the class symbol is only a skeleton - the
+                # calls inside each body belong to that method's symbol.
+                self.add(
+                    child,
+                    name,
+                    "class",
+                    parent,
+                    code=class_skeleton(child, self.source),
+                    calls=[],
+                    instantiates=[],
+                )
+                body = child.child_by_field_name("body")
+                if body is not None:
+                    self.visit_members(body, name or parent)
+            elif kind in FUNCTION_NODES:
+                self.add(child, node_name(child, self.source), "function", parent)
+            elif kind in TYPE_NODES:
+                self.add(
+                    child,
+                    node_name(child, self.source),
+                    kind.replace("_declaration", ""),
+                    parent,
+                    code=type_skeleton(child, self.source),
+                    calls=[],
+                    instantiates=[],
+                )
+            elif kind in DECLARATION_NODES:
+                self.visit_declaration(child, parent)
+            else:
+                # Recurse into namespaces, blocks and anything else that may
+                # wrap a declaration. Recorded nodes are never re-entered, so
+                # nested helpers are captured with their enclosing symbol.
+                self.visit(child, parent)
+
+    def visit_declaration(self, node: Node, parent: str | None) -> None:
+        """Record `const foo = () => {}` style function bindings."""
+        for declarator in node.named_children:
+            if declarator.type != "variable_declarator":
+                continue
+            value = declarator.child_by_field_name("value")
+            if value is not None and value.type in FUNCTION_VALUE_NODES:
+                self.add(declarator, node_name(declarator, self.source), "function", parent)
+
+    def visit_members(self, body: Node, class_name: str | None) -> None:
+        for member in body.named_children:
+            if member.type not in MEMBER_NODES:
+                continue
+            name = node_name(member, self.source)
+            if member.type == "public_field_definition":
+                # Only fields holding a function are worth their own symbol.
+                value = member.child_by_field_name("value")
+                if value is None or value.type not in FUNCTION_VALUE_NODES:
+                    continue
+            self.add(member, name, "method", class_name)
+
+
+def parse_file(
+    source: bytes,
+    language: str,
+    rel_path: str,
+    max_chars: int = 4000,
+    min_chars: int = 0,
+) -> tuple[list[Symbol], list[str], ModuleInterface]:
+    """Parse once, returning the symbols, the import specifiers and the
+    module's interface."""
+    tree = get_parser(language).parse(source)
+    extractor = SymbolExtractor(source, rel_path, max_chars, min_chars)
+    extractor.visit(tree.root_node)
+    interface = extract_module_interface(tree.root_node, source)
+
+    # Marked from the export statements rather than threaded through visit():
+    # `export function foo()` and a later `export {foo}` both make foo public,
+    # and only one of them is visible where the symbol is recorded.
+    exported = set(interface.exported_names)
+    for symbol in extractor.symbols:
+        symbol.exported = symbol.name in exported
+
+    return extractor.symbols, extract_imports(tree.root_node, source), interface
+
+
+def extract_symbols(
+    source: bytes,
+    language: str,
+    rel_path: str,
+    max_chars: int = 4000,
+    min_chars: int = 0,
+) -> list[Symbol]:
+    return parse_file(source, language, rel_path, max_chars, min_chars)[0]
+
+
+def extract_interface(source: bytes, language: str) -> ModuleInterface:
+    tree = get_parser(language).parse(source)
+    return extract_module_interface(tree.root_node, source)
+
+
+def find_workspace_packages(repo: Path, ignore_dirs: set[str]) -> dict[str, str]:
+    """Map each package.json `name` to the directory holding it.
+
+    In a monorepo a bare specifier is as likely to name a sibling package as an
+    external dependency, and those cross-package imports are the ones that
+    describe the architecture. Without this they all resolve to nothing.
+    """
+    packages: dict[str, str] = {}
+    for root, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+        if "package.json" not in filenames:
+            continue
+        try:
+            name = json.loads(
+                (Path(root) / "package.json").read_text(encoding="utf-8")
+            ).get("name")
+        except (OSError, ValueError) as exc:
+            logger.debug("Skipping %s/package.json: %s", root, exc)
+            continue
+        if name:
+            packages[name] = Path(root).relative_to(repo).as_posix()
+    return packages
+
+
+def _strip_jsonc(text: str) -> str:
+    """tsconfig.json is JSON with comments and trailing commas."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"(^|\s)//[^\n]*", "", text)
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+def find_path_aliases(repo: Path, ignore_dirs: set[str]) -> list[dict]:
+    """`compilerOptions.paths` from every tsconfig, as repo-relative prefixes.
+
+    An alias is invisible to a resolver that only understands relative and
+    package specifiers, and a repo can use them for everything: this project's
+    own web client imports `@/...` 51 times and produced no edges at all.
+    """
+    aliases: list[dict] = []
+    for root, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+        for filename in filenames:
+            if not (filename.startswith("tsconfig") and filename.endswith(".json")):
+                continue
+            try:
+                config = json.loads(
+                    _strip_jsonc((Path(root) / filename).read_text(encoding="utf-8"))
+                )
+            except (OSError, ValueError) as exc:
+                logger.debug("Skipping %s/%s: %s", root, filename, exc)
+                continue
+            options = config.get("compilerOptions") or {}
+            base = Path(root) / (options.get("baseUrl") or ".")
+            for pattern, targets in (options.get("paths") or {}).items():
+                resolved = []
+                for target in targets:
+                    try:
+                        rel = (base / target.replace("*", "")).resolve()
+                        resolved.append(rel.relative_to(repo.resolve()).as_posix())
+                    except ValueError:
+                        continue  # points outside the repo
+                if resolved:
+                    aliases.append(
+                        {"prefix": pattern.replace("*", ""), "targets": resolved}
+                    )
+    # Longest prefix first, so `@/lib/` is not swallowed by `@/`.
+    return sorted(aliases, key=lambda a: -len(a["prefix"]))
+
+
+def build_index(
+    repo: Path,
+    ignore_dirs: set[str],
+    ignore_globs: list[str],
+    max_chars: int,
+    min_chars: int,
+) -> list[FileRecord]:
+    records: list[FileRecord] = []
+    failures = 0
+    for path, language in iter_source_files(repo, ignore_dirs, ignore_globs):
+        rel_path = path.relative_to(repo).as_posix()
+        try:
+            source = path.read_bytes()
+            symbols, imports, interface = parse_file(
+                source, language, rel_path, max_chars, min_chars
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
+            failures += 1
+            logger.warning("Skipping %s: %s", rel_path, exc)
+            continue
+        # Recorded even with no symbols. A barrel that only re-exports, or a
+        # module of plain constants, defines nothing worth embedding - but it
+        # is still the target of imports, and dropping it left every one of
+        # those pointing at a file the graph had never heard of.
+        records.append(
+            FileRecord(
+                path=rel_path,
+                name=path.name,
+                language=language,
+                depth=len(path.relative_to(repo).parts) - 1,
+                symbols=symbols,
+                imports=imports,
+                bindings=interface.bindings,
+                re_exports=interface.re_exports,
+            )
+        )
+    if failures:
+        logger.warning("%d file(s) could not be parsed", failures)
+    return records
+
+
+def build_payload(
+    repo: Path,
+    repo_name: str | None = None,
+    ignore_dirs: set[str] | None = None,
+    ignore_globs: list[str] | None = None,
+    max_chars: int = 4000,
+    min_chars: int = 0,
+    source_url: str | None = None,
+) -> dict:
+    """Index a checkout and return the JSON structure the loader consumes.
+
+    Shared by the CLI and the loader UI so both produce an identical index.
+    """
+    repo = Path(repo)
+    skipped_dirs = set(DEFAULT_IGNORE_DIRS) | set(ignore_dirs or ())
+    records = build_index(
+        repo,
+        skipped_dirs,
+        DEFAULT_IGNORE_GLOBS + list(ignore_globs or ()),
+        max_chars,
+        min_chars,
+    )
+    payload: dict = {
+        "repo": repo_name or repo.name,
+        "packages": find_workspace_packages(repo, skipped_dirs),
+        "aliases": find_path_aliases(repo, skipped_dirs),
+        "files": [asdict(record) for record in records],
+    }
+    if source_url:
+        payload["source_url"] = source_url
+    return payload
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--repo", type=Path, help="Local repository to index")
+    source.add_argument(
+        "--github-url",
+        help="Public repository URL to clone and index, e.g. owner/repo",
+    )
+    parser.add_argument("--branch", help="Branch to clone (with --github-url)")
+    # Written into index/, which docker-compose mounts into the loader container.
+    parser.add_argument("--output", type=Path, default=Path("index/all_code_blocks.json"))
+    # 4000 chars x the retriever's k=4 keeps the RAG prompt inside the LLM context.
+    parser.add_argument("--max-chars", type=int, default=4000, help="Truncate symbols longer than this")
+    parser.add_argument("--min-chars", type=int, default=0, help="Skip symbols shorter than this")
+    parser.add_argument("--ignore-dir", action="append", default=[], help="Extra directory name to skip")
+    parser.add_argument("--ignore-glob", action="append", default=[], help="Extra path glob to skip")
+    parser.add_argument("--verbose", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+
+    build_kwargs = dict(
+        ignore_dirs=set(args.ignore_dir),
+        ignore_globs=args.ignore_glob,
+        max_chars=args.max_chars,
+        min_chars=args.min_chars,
+    )
+
+    if args.github_url:
+        from genai_stack.sources import cloned_repository, parse_repo_url
+
+        try:
+            ref = parse_repo_url(args.github_url, args.branch)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            return 1
+        logger.info("Cloning %s...", ref.slug)
+        try:
+            with cloned_repository(ref) as checkout:
+                payload = build_payload(
+                    checkout,
+                    repo_name=ref.name,
+                    source_url=ref.clone_url,
+                    **build_kwargs,
+                )
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            return 1
+    else:
+        repo = (args.repo or Path("../Rocket.Chat")).resolve()
+        if not repo.is_dir():
+            logger.error("Repository not found: %s", repo)
+            return 1
+        payload = build_payload(repo, **build_kwargs)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    total_symbols = sum(len(f["symbols"]) for f in payload["files"])
+    logger.info(
+        "Wrote %d symbols from %d files to %s",
+        total_symbols,
+        len(payload["files"]),
+        args.output,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,145 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The same palette the Streamlit app uses, so the two do not look like two
+   different products while both are around. */
+@layer base {
+  :root {
+    --background: 222 20% 7%;
+    --foreground: 220 20% 92%;
+    --card: 222 19% 10%;
+    --card-foreground: 220 20% 92%;
+    --popover: 222 20% 9%;
+    --popover-foreground: 220 20% 92%;
+    --primary: 224 100% 74%;
+    --primary-foreground: 224 40% 8%;
+    --secondary: 222 16% 14%;
+    --secondary-foreground: 220 20% 92%;
+    --muted: 222 16% 14%;
+    --muted-foreground: 220 10% 58%;
+    --accent: 224 60% 20%;
+    --accent-foreground: 220 20% 92%;
+    --destructive: 0 62% 55%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 222 16% 17%;
+    --input: 222 16% 17%;
+    --ring: 224 100% 74%;
+    --radius: 0.75rem;
+
+    --sidebar: 222 25% 5%;
+    --sidebar-foreground: 220 18% 88%;
+    --sidebar-accent: 224 60% 18%;
+    --sidebar-border: 222 18% 13%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+  }
+
+  /* Scrollbars that do not shout. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-white/10;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-white/20;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* Answers arrive as markdown; give them room without a plugin. */
+@layer components {
+  .prose-answer {
+    @apply text-[0.95rem] leading-7;
+  }
+  .prose-answer p {
+    @apply mb-3 last:mb-0;
+  }
+  .prose-answer ul {
+    @apply mb-3 list-disc space-y-1 pl-5;
+  }
+  .prose-answer ol {
+    @apply mb-3 list-decimal space-y-1 pl-5;
+  }
+  .prose-answer h1,
+  .prose-answer h2,
+  .prose-answer h3 {
+    @apply mb-2 mt-4 font-semibold first:mt-0;
+  }
+  .prose-answer code {
+    @apply rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[0.85em];
+  }
+  .prose-answer pre {
+    @apply mb-3 overflow-x-auto rounded-lg border border-border bg-black/40 p-3;
+  }
+  .prose-answer pre code {
+    @apply bg-transparent p-0 text-[0.85rem];
+  }
+  .prose-answer a {
+    @apply text-primary underline underline-offset-2;
+  }
+  .prose-answer blockquote {
+    @apply mb-3 border-l-2 border-border pl-3 text-muted-foreground;
+  }
+  .prose-answer table {
+    @apply mb-3 w-full text-left text-sm;
+  }
+  .prose-answer th,
+  .prose-answer td {
+    @apply border-b border-border px-2 py-1;
+  }
+
+  /* The typing caret, drawn at the end of the last line of text rather than as
+     an element after it - a block-level sibling starts its own line, which is
+     what stranded the caret below the answer.
+
+     It has to land on the deepest last element, not the outermost one: an
+     ::after on a list renders below the list, and on a list item that itself
+     contains a nested list it renders below that nested list. So walk the
+     chain of last children explicitly, and let only a leaf draw - the
+     :not(:has(ul, ol)) guard stops an outer level drawing a second caret.
+     Three levels is deeper than any answer this produces. */
+  .prose-answer.is-streaming > :last-child:not(ul):not(ol)::after,
+  .prose-answer.is-streaming
+    > :is(ul, ol):last-child
+    > li:last-child:not(:has(ul, ol))::after,
+  .prose-answer.is-streaming
+    > :is(ul, ol):last-child
+    > li:last-child
+    > :is(ul, ol):last-child
+    > li:last-child:not(:has(ul, ol))::after,
+  .prose-answer.is-streaming
+    > :is(ul, ol):last-child
+    > li:last-child
+    > :is(ul, ol):last-child
+    > li:last-child
+    > :is(ul, ol):last-child
+    > li:last-child::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1.05em;
+    margin-left: 3px;
+    vertical-align: text-bottom;
+    background-color: currentColor;
+    animation: caret-blink 1s step-end infinite;
+  }
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}

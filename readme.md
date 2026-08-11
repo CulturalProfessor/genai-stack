@@ -1,160 +1,312 @@
-# GenAI Stack
-This GenAI application stack will get you started building your
-own GenAI application in no time.
-The demo applications can serve as inspiration or as a starting point.
-Learn more about the details in the [technical blog post](https://neo4j.com/developer-blog/genai-app-how-to-build/).
+# Code graph RAG
 
-# Configure
+Point it at a TypeScript/JavaScript repository and ask questions about it.
 
-Create a `.env` file from the environment template file `env.example`
+The repo is parsed into a **knowledge graph** in Neo4j — every function, method,
+class and type is a node, with edges for what calls what and which files import
+which. Answering a question searches that graph *and walks its relationships*,
+so the model sees the code you asked about **plus the code around it**.
 
-Available variables:
-| Variable Name          | Default value                      | Description                                                             |
-|------------------------|------------------------------------|-------------------------------------------------------------------------|
-| OLLAMA_BASE_URL        | http://host.docker.internal:11434  | REQUIRED - URL to Ollama LLM API                                        |   
-| NEO4J_URI              | neo4j://database:7687              | REQUIRED - URL to Neo4j database                                        |
-| NEO4J_USERNAME         | neo4j                              | REQUIRED - Username for Neo4j database                                  |
-| NEO4J_PASSWORD         | password                           | REQUIRED - Password for Neo4j database                                  |
-| LLM                    | llama2                             | REQUIRED - Can be any Ollama model tag, or gpt-4 or gpt-3.5 or claudev2 |
-| EMBEDDING_MODEL        | sentence_transformer               | REQUIRED - Can be sentence_transformer, openai, aws or ollama           |
-| AWS_ACCESS_KEY_ID      |                                    | REQUIRED - Only if LLM=claudev2 or embedding_model=aws                  |
-| AWS_SECRET_ACCESS_KEY  |                                    | REQUIRED - Only if LLM=claudev2 or embedding_model=aws                  |
-| AWS_DEFAULT_REGION     |                                    | REQUIRED - Only if LLM=claudev2 or embedding_model=aws                  |
-| OPENAI_API_KEY         |                                    | REQUIRED - Only if LLM=gpt-4 or LLM=gpt-3.5 or embedding_model=openai   |
-| LANGCHAIN_ENDPOINT     | "https://api.smith.langchain.com"  | OPTIONAL - URL to Langchain Smith API                                   |
-| LANGCHAIN_TRACING_V2   | false                              | OPTIONAL - Enable Langchain tracing v2                                  |
-| LANGCHAIN_PROJECT      |                                    | OPTIONAL - Langchain project name                                       |
-| LANGCHAIN_API_KEY      |                                    | OPTIONAL - Langchain API key                                            |
-
-## LLM Configuration
-MacOS and Linux users can use any LLM that's available via Ollama. Check the "tags" section under the model page you want to use on https://ollama.ai/library and write the tag for the value of the environment variable `LLM=` in th e`.env` file.
-All platforms can use GPT-3.5-turbo and GPT-4 (bring your own API keys for OpenAIs models).
-
-**MacOS**
-Install [Ollama](https://ollama.ai) on MacOS and start it before running `docker compose up`.
-
-**Linux**
-No need to install Ollama manually, it will run in a container as
-part of the stack when running with the Linux profile: run `docker compose --profile linux up`.
-Make sure to set the `OLLAMA_BASE_URL=http://llm:11434` in the `.env` file when using Ollama docker container.
-
-**Windows**
-Not supported by Ollama, so Windows users need to generate a OpenAI API key and configure the stack to use `gpt-3.5` or `gpt-4` in the `.env` file.
-# Develop
-
-> [!WARNING]
-> There is a performance issue that impacts python applications in the latest release of Docker Desktop. Until a fix is available, please use [version `4.23.0`](https://docs.docker.com/desktop/release-notes/#4230) or earlier.
-
-**To start everything**
-
-In fs.py file change directory path to your preferred ts/js local repo (This project was built with taking Rocket.Chat repo locally). This will generate a all_code_blocks.json file whose content which you have to then paste in loader.py replacing in code variable. In env also use LLM=codellam and EMBEDDING_MODEL=sentence_transformer.
-
-```
-python3 fs.py
-```
-
-```
-docker compose up
-```
-If changes to build scripts has been made, **rebuild**.
-```
-docker compose up --build
-```
-
-To enter **watch mode** (auto rebuild on file changes).
-First start everything, then in new terminal:
-```
-docker compose alpha watch
-```
-
-**Shutdown**
-If health check fails or containers don't start up as expected, shutdown
-completely to start up again.
-```
-docker compose down
-```
-
-# Applications
-
-Here's what's in this repo:
-
-| Name | Main files | Compose name | URLs | Description |
-|---|---|---|---|---|
-| Support Bot | `bot.py` | `bot` | http://localhost:8501 | Main usecase. Fullstack Python application. |
-| Stack Overflow Loader | `loader.py` | `loader` | http://localhost:8502 | Load SO data into the database (create vector embeddings etc). Fullstack Python application. |
-| PDF Reader | `pdf_bot.py` | `pdf_bot` | http://localhost:8503 | Read local PDF and ask it questions. Fullstack Python application. |
-| Standalone Bot API | `api.py` | `api` | http://localhost:8504 | Standalone HTTP API streaming (SSE) + non-streaming endpoints. Python. |
-| Standalone Bot UI | `front-end/` | `front-end` | http://localhost:8505 | Standalone client that uses the Standalone Bot API to interact with the model. JavaScript (Svelte) front-end. |
-
-The database can be explored at http://localhost:7474.
-
-## App 1 - Support Agent Bot
-
-UI: http://localhost:8501
-DB client: http://localhost:7474
-
-- answer support question based on recent entries
-- provide summarized answers with sources
-- demonstrate difference between
-    - RAG Disabled (pure LLM response)
-    - RAG Enabled (vector + knowledge graph context)
-- allow to generate a high quality support ticket for the current conversation based on the style of highly rated questions in the database.
-
-![](.github/media/app1-rag-selector.png)
-*(Chat input + RAG mode selector)*
-
-|  |  |
-|---|---|
-| ![](.github/media/app1-generate.png) | ![](.github/media/app1-ticket.png) |
-| *(CTA to auto generate support ticket draft)* | *(UI of the auto generated support ticket draft)* |
+Attach a PDF to a chat and it is read alongside the code, which is what you want
+when the answer is half in a spec and half in the implementation.
 
 ---
 
-##  App 2 - Loader
+## How it works
 
-UI: http://localhost:8502
-DB client: http://localhost:7474
-
-- import recent Stack Overflow data for certain tags into a KG
-- embed questions and answers and store in vector index
-- UI: choose tags, run import, see progress, some stats of data in the database
-- Load high ranked questions (regardless of tags) to support the ticket generation feature of App 1.
-
-
-
-
-|  |  |
-|---|---|
-| ![](.github/media/app2-ui-1.png) | ![](.github/media/app2-model.png) |
-
-## App 3 Question / Answer with a local PDF
-UI: http://localhost:8503  
-DB client: http://localhost:7474
-
-This application lets you load a local PDF into text
-chunks and embed it into Neo4j so you can ask questions about
-its contents and have the LLM answer them using vector similarity
-search.
-
-![](.github/media/app3-ui.png)
-
-## App 4 Standalone HTTP API
-Endpoints: 
-  - http://localhost:8504/query?text=hello&rag=false (non streaming)
-  - http://localhost:8504/query-stream?text=hello&rag=false (SSE streaming)
-
-Example cURL command:
-```bash
-curl http://localhost:8504/query-stream\?text\=minimal%20hello%20world%20in%20python\&rag\=false
+```mermaid
+flowchart LR
+    url(["repo URL"]) --> api["API :8504<br/>clone + parse + embed"]
+    pdf(["PDF, attached to a chat"]) --> api
+    api --> neo4j[("Neo4j :7474<br/>code graph<br/>+ document chunks")]
+    q(["question"]) --> chain["GraphRAG chain"]
+    chain <-->|hybrid search<br/>+ graph traversal| neo4j
+    chain --> llm["LLM"]
+    llm --> ans(["answer + sources"])
 ```
 
-Exposes the functionality to answer questions in the same way as App 1 above. Uses
-same code and prompts.
+### The graph
 
-## App 5 Static front-end
-UI: http://localhost:8505
+Every symbol is its own node keyed by `path:line:qualified_name`, so a name that
+repeats across the repo never collapses into one shared node.
 
-This application has the same features as App 1, but is built separate from
-the back-end code using modern best practices (Vite, Svelte, Tailwind).  
-The auto-reload on changes are instant using the Docker watch `sync` config.  
-![](.github/media/app5-ui.png)
+```mermaid
+graph LR
+    F1["File<br/><small>core/Ky.ts</small>"] -->|CONTAINS| C1["Code<br/><small>Ky.calculateRetryDelay</small>"]
+    F1 -->|CONTAINS| C2["Code<br/><small>Ky.retry</small>"]
+    F2["File<br/><small>utils/delay.ts</small>"] -->|CONTAINS| C3["Code<br/><small>delay</small>"]
+    F1 -->|IMPORTS| F2
+    C2 -->|CALLS| C1
+    C1 -->|CALLS| C3
+```
+
+### Retrieval
+
+Vector search finds an entry point. The graph supplies the context around it —
+that traversal is what makes this GraphRAG rather than vector search that
+happens to be stored in a graph.
+
+```mermaid
+flowchart TD
+    Q(["how are retries decided?"]) --> H{"hybrid search<br/>vector + full-text"}
+    H -->|top k = 4| HIT["matched Code node"]
+    HIT -->|CALLS| CALLEE["what it calls"]
+    HIT -->|CALLS reversed| CALLER["what calls it"]
+    HIT -->|CONTAINS / IMPORTS| FILE["its file + dependencies"]
+    CALLEE --> CTX["context block:<br/>source + // Calls / // Called by"]
+    CALLER --> CTX
+    FILE --> CTX
+    CTX --> LLM["LLM answers, citing file paths"]
+```
+
+Full-text sits alongside vectors because code questions often name a symbol
+exactly, which lexical matching handles better than embeddings.
+
+When the chat has PDFs attached, their chunks are retrieved in the same pass and
+share that budget rather than adding to it — `k` drops from 4 symbols to 2, plus
+4 excerpts, which is about the same amount of context either way.
+
+---
+
+## Quick start
+
+**1.** Copy `env.example` to `.env`. The defaults work; the one choice that
+matters is the model.
+
+**2.** Start it:
+
+```bash
+docker compose up
+```
+
+Answering questions needs an LLM. On Linux, run one in a container:
+
+```bash
+docker compose --profile linux up
+```
+
+...with `OLLAMA_BASE_URL=http://llm:11434` in `.env`. Add `COMPOSE_PROFILES=linux`
+there too and a plain `docker compose up` starts it; leave it out and the
+hostname `llm` does not resolve on any run where you forget the flag. Or set
+`LLM=gpt-3.5` plus an `OPENAI_API_KEY` and nothing is downloaded. Without
+either, indexing still works and questions report a clear error.
+
+**3.** Open **http://localhost:5173**, paste a repository URL on *Index a
+repository*, and press the button. Then ask questions on *Ask the codebase* —
+and use the paperclip there if a PDF belongs in the conversation too.
+
+The importer is idempotent — re-indexing updates nodes in place.
+
+---
+
+## Conversations
+
+Chats are saved in Neo4j, not in the browser, so they survive a refresh and a
+`docker compose down`. **New chat** in the sidebar starts one, the list switches
+between them, and each can be renamed or deleted. A chat is titled after its
+first question.
+
+```
+(:Conversation {id, title})-[:HAS_MESSAGE]->(:Message {role, content, position})
+(:Conversation)-[:USES_DOCUMENT]->(:PdfDocument {id, name, pages, chunks})
+```
+
+Messages carry an explicit `position` rather than being ordered by timestamp —
+both halves of a turn are written milliseconds apart.
+
+These labels sit outside the code graph on purpose: clearing the index from
+*Danger zone* deletes `File`, `Code` and `Repository` nodes and leaves your
+conversations and uploaded PDFs alone.
+
+### PDFs in a chat
+
+The paperclip in the composer uploads a PDF into the chat you are in, and from
+then on questions are answered from the code graph and those documents together
+— useful when the answer is half in a spec and half in the code. Several can be
+attached at once, and the retrieval budget is shared rather than added to.
+"LLM only" turns off the codebase, not the attachments.
+
+Each PDF is chunked under its own `document_id`, and retrieval filters on the
+ids attached to the conversation asking. The id is content-addressed, so the
+same file uploaded into a second chat is embedded once and shared; removing it
+from the last chat holding it deletes its chunks.
+
+---
+
+## What runs where
+
+| URL | Service | What it is |
+|---|---|---|
+| **http://localhost:5173** | `web` | The app, in React: ask the codebase (attaching PDFs if you like), index a repository. |
+| http://localhost:7474 | `database` | Neo4j browser — inspect the graph directly. neo4j / password. |
+| http://localhost:8504 | `api` | HTTP API over the chains, conversations, PDFs and indexing. The client uses nothing else. |
+
+One optional extra, off by default:
+
+```bash
+docker compose --profile linux up      # + Ollama at :11434
+```
+
+## Where is what
+
+```
+Dockerfile              one image, shared by every Python service
+web.Dockerfile          node image for the React dev server
+docker-compose.yml      four services by default: web, api, database, pull-model
+
+genai_stack/            the library — no UI, no app code
+  settings.py           environment configuration, read once
+  extract.py            tree-sitter parsing: symbols, calls, imports
+  code_index.py         reshaping the index, resolving imports to files
+  schema.py             Neo4j labels, constraints, indexes
+  ingest.py             writing nodes and relationships
+  retrieval.py          the graph traversal query + the two vector stores
+  llm.py                loading chat and embedding models
+  chains.py             the LLM-only and GraphRAG chains, and the retriever
+                        that reads code and attached PDFs together
+  conversations.py      saved chats and their messages
+  pdf_store.py          PDFs attached to a chat, and their chunks
+  sources.py            validating and cloning repository URLs
+
+apps/
+  api.py                the FastAPI service - the only backend entry point
+
+web/                    the React client (Vite, Tailwind, shadcn primitives)
+  src/lib/api.ts        the typed API client, including the SSE streams
+  src/hooks/useChat.ts  conversations, messages, attachments and streaming
+  src/views/            ChatView, IndexView
+  src/components/       NavRail, Sidebar, Transcript, Composer (with the
+                        paperclip that uploads a PDF into the chat)
+tests/                  the index pipeline, conversations, PDF attachment
+index/                  generated code indexes (gitignored)
+data/                   Neo4j's database volume (gitignored)
+```
+
+---
+
+## Configuration
+
+Everything is optional except the model choice. Full list in `env.example`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `LLM` | `qwen2.5-coder:1.5b` | Any Ollama tag, or `gpt-4`, `gpt-3.5`, `claude` |
+| `EMBEDDING_MODEL` | `sentence_transformer` | Or `openai`, `aws`, `ollama` |
+| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | `http://llm:11434` with the linux profile |
+| `NEO4J_URI` / `_USERNAME` / `_PASSWORD` | `neo4j://database:7687` / `neo4j` / `password` | |
+| `OPENAI_API_KEY` | | Only for `gpt-*` or `EMBEDDING_MODEL=openai` |
+| `AWS_*`, `BEDROCK_MODEL_ID` | `anthropic.claude-sonnet-5` | Only for `LLM=claude` or `EMBEDDING_MODEL=aws` |
+| `IMPORT_BATCH_SIZE` | `100` | Symbols embedded and written per batch |
+| `ALLOWED_GIT_HOSTS` | `github.com,gitlab.com,bitbucket.org` | Hosts the API may clone from |
+| `API_KEY` | *(empty = no auth)* | When set, required as `X-API-Key` |
+| `ALLOWED_ORIGINS` | `http://localhost:5173` | CORS allowlist for the API |
+| `RATE_LIMIT_REQUESTS` / `_WINDOW_SECONDS` | `30` / `60` | Per client IP; `0` disables |
+
+### Choosing a model
+
+| `LLM=` | Download | RAM in use | Notes |
+|---|---|---|---|
+| `qwen2.5-coder:1.5b` | ~1.0 GB | ~1.5 GB | Default. Code-specific. |
+| `qwen2.5-coder:7b` | ~4.7 GB | ~6 GB | Better answers if you have the room. |
+| `llama3.2:3b` | ~2.0 GB | ~3 GB | General purpose. |
+| `gpt-3.5` / `gpt-4` | none | none | Needs `OPENAI_API_KEY`. |
+
+Disk for the whole stack: ~2 GB app image, ~0.6 GB Neo4j, plus ~4.5 GB if you
+run Ollama in a container.
+
+---
+
+## The HTTP API
+
+| Endpoint | Body |
+|---|---|
+| `POST /query` | `{"text": "...", "rag": true}` |
+| `POST /generate-ticket` | `{"text": "..."}` |
+| `GET /query-stream?text=…&rag=true` | SSE. Stays a GET because `EventSource` cannot POST. |
+| `GET/POST /conversations` | List, or create one. No body. |
+| `GET/PATCH/DELETE /conversations/{id}` | Load with its messages and attached PDFs, rename, remove. |
+| `GET /conversations/{id}/ask?text=…&rag=true` | SSE. Saves both turns; any PDFs attached to the chat are searched too. |
+| `POST /conversations/{id}/documents` | Attach a PDF as multipart `file`, indexing it if it is new. |
+| `DELETE /conversations/{id}/documents/{doc}` | Detach it; its chunks go with it if no other chat has it. |
+| `GET/DELETE /graph` | Counts and indexed repositories, or clear the code graph. |
+| `GET /graph/index?url=…&branch=…` | SSE. Clone, parse and import, reporting progress. |
+
+```bash
+curl -X POST http://localhost:8504/query -H 'Content-Type: application/json' \
+  -d '{"text": "how are retries decided?", "rag": true}'
+```
+
+With `API_KEY` set, send `-H "X-API-Key: …"` (or `&api_key=…` on the stream).
+
+---
+
+## Indexing from the command line
+
+The app and the CLI share one code path. The CLI only writes JSON — nothing
+reaches Neo4j until you import it:
+
+```bash
+python3 -m genai_stack.extract --github-url sindresorhus/ky
+```
+
+```bash
+python3 -m genai_stack.extract --repo ../some-local-checkout
+```
+
+On the host this needs only tree-sitter, not the full stack:
+
+```bash
+pip install tree-sitter tree-sitter-typescript tree-sitter-javascript
+```
+
+Flags: `--branch`, `--ignore-dir` / `--ignore-glob`, `--max-chars` (where long
+symbols are truncated; the 4000 default fits the retriever's `k=4` inside the
+model context), `--min-chars`. Output lands in `index/`.
+
+Import the result with **Import an index file** on *Index a repository*, or:
+
+```bash
+curl -X POST http://localhost:8504/graph/import \
+  -F file=@index/all_code_blocks.json
+```
+
+This is the route for a **local checkout** — indexing from the app clones over
+`https://` and cannot see a directory on your disk.
+
+> Repositories are **cloned and parsed, never executed** — no install or build
+> step runs. Public repos over `https://` only, restricted to
+> `ALLOWED_GIT_HOSTS`.
+
+---
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt && python3 -m pytest tests/
+```
+
+Covers symbol extraction, call and import resolution, URL validation, index
+reshaping, and the Cypher behind conversations and PDF attachment — the last of
+those against a fake graph, so no database and no LLM are needed.
+
+---
+
+## Known limits
+
+- **TypeScript and JavaScript only** (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`,
+  `.cjs`). Other languages produce an empty index.
+- **Call edges are resolved by name**, preferring a definition in the same file
+  and otherwise requiring the name to be unique in the repo. Ambiguous names are
+  left unlinked rather than linked incorrectly.
+- **Dynamic dispatch is invisible** — `handlers[key]()` produces no edge.
+- **Interfaces and enums are stored as member skeletons**, without their doc
+  comments. Full JSDoc bodies used to dominate semantic search over the code
+  that implements the behaviour being asked about.
+- **Attached PDFs are not part of the code graph** — their chunks live under
+  their own `PdfBotChunk` label and are found by plain vector search, with no
+  traversal, so a question spanning both gets the graph on one side only.
+
+---
+
+Originally a fork of [neo4j-labs/genai-stack](https://github.com/docker/genai-stack),
+rebuilt around a code knowledge graph.

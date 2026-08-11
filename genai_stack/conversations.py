@@ -1,0 +1,270 @@
+"""Saved conversations, stored in Neo4j alongside the code graph.
+
+Neo4j is already a hard dependency of every service here, so chats live there
+rather than in a second store: no extra volume to mount, and a conversation
+survives `docker compose down`. The labels are deliberately outside the code
+graph's own - `reset_graph` deletes File and Code nodes, and clearing an index
+must not take a user's chat history with it.
+
+    (:Conversation {id, title, created_at, updated_at})
+    (:Message {id, role, content, mode, created_at, position})
+
+    (:Conversation)-[:HAS_MESSAGE]->(:Message)
+
+A conversation is one kind of thing: a chat. What it can be answered from is
+not a property of it - the code graph is always there, and any PDFs uploaded
+into it hang off it as USES_DOCUMENT edges, which pdf_store owns.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+CONVERSATION_LABEL = "Conversation"
+MESSAGE_LABEL = "Message"
+
+# The edge to an attached PDF. Named here because it is an edge out of a
+# Conversation and this module counts them; pdf_store is what follows them.
+USES_DOCUMENT = "USES_DOCUMENT"
+
+# A new chat has no title until its first question arrives. Not "New chat",
+# which is the button that makes one - the list would read as two of those.
+UNTITLED = "Untitled chat"
+
+# Titles are the question's first line, cut to something a sidebar can show.
+TITLE_MAX_CHARS = 60
+
+
+@dataclass(frozen=True)
+class Conversation:
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int = 0
+    # Enough for a sidebar, and for telling a blank chat from one that already
+    # has a PDF waiting in it. The documents themselves come from pdf_store.
+    document_count: int = 0
+
+
+@dataclass(frozen=True)
+class Message:
+    id: str
+    role: str
+    content: str
+    created_at: str
+    mode: str | None = None
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def title_from(question: str) -> str:
+    """A sidebar label derived from the first question of a chat."""
+    line = " ".join(question.strip().split())
+    if not line:
+        return UNTITLED
+    if len(line) <= TITLE_MAX_CHARS:
+        return line
+    # Prefer breaking on a word boundary, but only if one is reasonably close
+    # to the limit - otherwise a long unbroken token would cut to nearly nothing.
+    cut = line[:TITLE_MAX_CHARS]
+    space = cut.rfind(" ")
+    if space > TITLE_MAX_CHARS // 2:
+        cut = cut[:space]
+    return cut.rstrip() + "..."
+
+
+def create_constraints(graph) -> None:
+    """Called from apply_schema, so every entry point gets these."""
+    graph.query(
+        f"CREATE CONSTRAINT conversation_id IF NOT EXISTS "
+        f"FOR (c:{CONVERSATION_LABEL}) REQUIRE c.id IS UNIQUE"
+    )
+    graph.query(
+        f"CREATE CONSTRAINT message_id IF NOT EXISTS "
+        f"FOR (m:{MESSAGE_LABEL}) REQUIRE m.id IS UNIQUE"
+    )
+
+
+def create_conversation(graph) -> str:
+    """Start an empty conversation and return its id."""
+    conversation_id = str(uuid.uuid4())
+    timestamp = _now()
+    graph.query(
+        f"""
+        CREATE (c:{CONVERSATION_LABEL} {{
+            id: $id, title: $title,
+            created_at: $timestamp, updated_at: $timestamp
+        }})
+        """,
+        {"id": conversation_id, "title": UNTITLED, "timestamp": timestamp},
+    )
+    return conversation_id
+
+
+def list_conversations(graph) -> list[Conversation]:
+    """Most recently used first - the order a sidebar wants."""
+    rows = graph.query(
+        f"""
+        MATCH (c:{CONVERSATION_LABEL})
+        RETURN c.id AS id, c.title AS title, c.created_at AS created_at,
+               c.updated_at AS updated_at,
+               COUNT {{ (c)-[:HAS_MESSAGE]->(:{MESSAGE_LABEL}) }} AS message_count,
+               COUNT {{ (c)-[:{USES_DOCUMENT}]->() }} AS document_count
+        ORDER BY c.updated_at DESC
+        """
+    )
+    return [Conversation(**row) for row in rows]
+
+
+def get_conversation(graph, conversation_id: str) -> Conversation | None:
+    rows = graph.query(
+        f"""
+        MATCH (c:{CONVERSATION_LABEL} {{id: $id}})
+        RETURN c.id AS id, c.title AS title, c.created_at AS created_at,
+               c.updated_at AS updated_at,
+               COUNT {{ (c)-[:HAS_MESSAGE]->(:{MESSAGE_LABEL}) }} AS message_count,
+               COUNT {{ (c)-[:{USES_DOCUMENT}]->() }} AS document_count
+        """,
+        {"id": conversation_id},
+    )
+    return Conversation(**rows[0]) if rows else None
+
+
+def load_messages(graph, conversation_id: str) -> list[Message]:
+    """Every message in the conversation, oldest first.
+
+    Ordered by an explicit position rather than by timestamp: two messages of
+    the same turn are written milliseconds apart, and a clock with coarse
+    resolution would be free to swap the question and its answer.
+    """
+    rows = graph.query(
+        f"""
+        MATCH (:{CONVERSATION_LABEL} {{id: $id}})-[:HAS_MESSAGE]->(m:{MESSAGE_LABEL})
+        RETURN m.id AS id, m.role AS role, m.content AS content,
+               m.mode AS mode, m.created_at AS created_at
+        ORDER BY m.position ASC
+        """,
+        {"id": conversation_id},
+    )
+    return [Message(**row) for row in rows]
+
+
+def append_message(
+    graph,
+    conversation_id: str,
+    role: str,
+    content: str,
+    mode: str | None = None,
+) -> str:
+    """Add one message and bump the conversation's updated_at."""
+    message_id = str(uuid.uuid4())
+    timestamp = _now()
+    graph.query(
+        f"""
+        MATCH (c:{CONVERSATION_LABEL} {{id: $conversation_id}})
+        OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(existing:{MESSAGE_LABEL})
+        WITH c, count(existing) AS position
+        CREATE (c)-[:HAS_MESSAGE]->(m:{MESSAGE_LABEL} {{
+            id: $id, role: $role, content: $content, mode: $mode,
+            position: position, created_at: $timestamp
+        }})
+        SET c.updated_at = $timestamp
+        """,
+        {
+            "conversation_id": conversation_id,
+            "id": message_id,
+            "role": role,
+            "content": content,
+            "mode": mode,
+            "timestamp": timestamp,
+        },
+    )
+    return message_id
+
+
+def rename_conversation(graph, conversation_id: str, title: str) -> None:
+    graph.query(
+        f"MATCH (c:{CONVERSATION_LABEL} {{id: $id}}) SET c.title = $title",
+        {"id": conversation_id, "title": title.strip() or UNTITLED},
+    )
+
+
+def set_title_if_untitled(graph, conversation_id: str, question: str) -> None:
+    """Name a chat after its first question, leaving a manual rename alone."""
+    graph.query(
+        f"""
+        MATCH (c:{CONVERSATION_LABEL} {{id: $id}})
+        WHERE c.title = $untitled
+        SET c.title = $title
+        """,
+        {"id": conversation_id, "untitled": UNTITLED, "title": title_from(question)},
+    )
+
+
+def delete_conversation(graph, conversation_id: str) -> None:
+    graph.query(
+        f"""
+        MATCH (c:{CONVERSATION_LABEL} {{id: $id}})
+        OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:{MESSAGE_LABEL})
+        DETACH DELETE c, m
+        """,
+        {"id": conversation_id},
+    )
+
+
+def group_by_age(
+    conversations: list[Conversation], now: datetime | None = None
+) -> list[tuple[str, list[Conversation]]]:
+    """Conversations bucketed the way every chat sidebar buckets them.
+
+    Returns (heading, conversations) in order, skipping empty buckets, so the
+    caller can render headings without deciding what the buckets are.
+    """
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+    buckets: dict[str, list[Conversation]] = {}
+
+    for conversation in conversations:
+        try:
+            updated = datetime.fromisoformat(conversation.updated_at).date()
+        except (TypeError, ValueError):
+            # A row written by hand, or by an older version. Better in the last
+            # bucket than crashing the sidebar.
+            heading = "Older"
+        else:
+            age = (today - updated).days
+            if age <= 0:
+                heading = "Today"
+            elif age == 1:
+                heading = "Yesterday"
+            elif age <= 7:
+                heading = "Previous 7 days"
+            elif age <= 30:
+                heading = "Previous 30 days"
+            else:
+                heading = "Older"
+        buckets.setdefault(heading, []).append(conversation)
+
+    order = ["Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"]
+    return [(heading, buckets[heading]) for heading in order if heading in buckets]
+
+
+def chat_history(messages: list[Message], limit: int = 6) -> list[tuple[str, str]]:
+    """Recent turns as (question, answer) pairs for a chain's chat_history.
+
+    Capped because the whole history shares the model's context window with the
+    retrieved code; the last few exchanges are what follow-up questions need.
+    """
+    pairs: list[tuple[str, str]] = []
+    pending: str | None = None
+    for message in messages:
+        if message.role == "user":
+            pending = message.content
+        elif message.role == "assistant" and pending is not None:
+            pairs.append((pending, message.content))
+            pending = None
+    return pairs[-limit:]
