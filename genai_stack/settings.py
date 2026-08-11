@@ -18,7 +18,7 @@ class Settings:
     import_batch_size: int
     api_key: str
     allowed_origins: list[str] = field(default_factory=list)
-    rate_limit_requests: int = 30
+    rate_limit_requests: int = 60
     rate_limit_window_seconds: int = 60
     embedding_cache: bool = True
     embedding_cache_path: str | None = None
