@@ -7,12 +7,11 @@ const API_KEY = import.meta.env.VITE_API_KEY ?? "";
 
 export type Conversation = {
   id: string;
-  kind: string;
   title: string;
-  subject: string | null;
   created_at: string;
   updated_at: string;
   message_count: number;
+  document_count: number;
 };
 
 export type Message = {
@@ -35,34 +34,25 @@ async function json<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function listConversations(
-  kind = "code",
-  subject?: string,
-): Promise<Conversation[]> {
-  const params = new URLSearchParams({ kind });
-  if (subject) params.set("subject", subject);
-  const response = await fetch(`${BASE}/conversations?${params}`, {
-    headers: headers(),
-  });
+export async function listConversations(): Promise<Conversation[]> {
+  const response = await fetch(`${BASE}/conversations`, { headers: headers() });
   const body = await json<{ conversations: Conversation[] }>(response);
   return body.conversations;
 }
 
-export async function createConversation(
-  kind = "code",
-  subject?: string,
-): Promise<Conversation> {
+export async function createConversation(): Promise<Conversation> {
   const response = await fetch(`${BASE}/conversations`, {
     method: "POST",
-    headers: headers({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ kind, subject: subject ?? null }),
+    headers: headers(),
   });
   return json<Conversation>(response);
 }
 
-export async function getConversation(
-  id: string,
-): Promise<{ conversation: Conversation; messages: Message[] }> {
+export async function getConversation(id: string): Promise<{
+  conversation: Conversation;
+  messages: Message[];
+  documents: PdfDocument[];
+}> {
   const response = await fetch(`${BASE}/conversations/${id}`, { headers: headers() });
   return json(response);
 }
@@ -227,7 +217,7 @@ export async function importIndexFile(
 }
 
 // ---------------------------------------------------------------------------
-// Uploaded PDFs
+// PDFs attached to a conversation
 // ---------------------------------------------------------------------------
 
 export type PdfDocument = {
@@ -238,16 +228,14 @@ export type PdfDocument = {
   uploaded_at: string;
 };
 
-export async function listDocuments(): Promise<PdfDocument[]> {
-  const response = await fetch(`${BASE}/pdf/documents`, { headers: headers() });
-  const body = await json<{ documents: PdfDocument[] }>(response);
-  return body.documents;
-}
-
-export async function uploadDocument(file: File): Promise<PdfDocument> {
+/** Upload a PDF into a chat. Indexing happens here, so this can be slow. */
+export async function attachDocument(
+  conversationId: string,
+  file: File,
+): Promise<PdfDocument> {
   const form = new FormData();
   form.append("file", file);
-  const response = await fetch(`${BASE}/pdf/documents`, {
+  const response = await fetch(`${BASE}/conversations/${conversationId}/documents`, {
     method: "POST",
     headers: headers(),
     body: form,
@@ -256,11 +244,14 @@ export async function uploadDocument(file: File): Promise<PdfDocument> {
   return body.document;
 }
 
-export async function deleteDocument(id: string): Promise<void> {
-  const response = await fetch(`${BASE}/pdf/documents/${id}`, {
-    method: "DELETE",
-    headers: headers(),
-  });
+export async function detachDocument(
+  conversationId: string,
+  documentId: string,
+): Promise<void> {
+  const response = await fetch(
+    `${BASE}/conversations/${conversationId}/documents/${documentId}`,
+    { method: "DELETE", headers: headers() },
+  );
   await json(response);
 }
 

@@ -12,7 +12,6 @@ from threading import Lock, Thread
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from langchain.chains import RetrievalQA
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_neo4j import Neo4jGraph, Neo4jVector
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -30,13 +29,10 @@ from genai_stack.chains import (
 )
 from genai_stack.code_index import count_symbols
 from genai_stack.conversations import (
-    KIND_CODE,
-    KIND_PDF,
     append_message,
     chat_history,
     create_conversation,
     delete_conversation,
-    delete_conversations_for,
     get_conversation,
     list_conversations,
     load_messages,
@@ -52,13 +48,13 @@ from genai_stack.ingest import (
 )
 from genai_stack.llm import load_embedding_model, load_llm
 from genai_stack.pdf_store import (
-    DOCUMENT_ID_PROPERTY,
     PDF_CHUNK_LABEL,
     PDF_INDEX_NAME,
+    attach_document,
     chunk_metadata,
-    delete_document,
+    detach_document,
+    documents_for,
     get_document,
-    list_documents,
     register_document,
 )
 from genai_stack.pdf_store import document_id as pdf_document_id
@@ -85,7 +81,7 @@ apply_schema(neo4j_graph, dimension)
 llm = load_llm(llm_name, logger=BaseLogger(), config=settings.embedding_config)
 
 llm_chain = configure_llm_only_chain(llm)
-rag_chain = configure_qa_rag_chain(
+rag_chain_for = configure_qa_rag_chain(
     llm,
     embeddings,
     embeddings_store_url=settings.neo4j_uri,
@@ -203,8 +199,15 @@ class BaseTicket(BaseModel):
     text: str
 
 
-def _chain_for(rag: bool):
-    return rag_chain if rag else llm_chain
+def _chain_for(rag: bool, document_ids: list[str] | None = None):
+    """What answers a question: the code graph, its attached PDFs, or neither.
+
+    "LLM only" turns the codebase off, not the documents - a PDF is in the chat
+    because someone put it there, so it is still read.
+    """
+    if rag or document_ids:
+        return rag_chain_for(document_ids, code=rag)
+    return llm_chain
 
 
 # EventSource only issues GET requests, so this endpoint takes query parameters.
@@ -246,11 +249,6 @@ async def ask(question: Question):
 # --------------------------------------------------------------------------
 
 
-class NewConversation(BaseModel):
-    kind: str = KIND_CODE
-    subject: str | None = None
-
-
 class RenameConversation(BaseModel):
     title: str
 
@@ -268,20 +266,13 @@ def _conversation_or_404(conversation_id: str):
 
 
 @app.get("/conversations", dependencies=guarded)
-async def conversations(kind: str = KIND_CODE, subject: str | None = None):
-    return {
-        "conversations": [
-            asdict(c) for c in list_conversations(neo4j_graph, kind=kind, subject=subject)
-        ]
-    }
+async def conversations():
+    return {"conversations": [asdict(c) for c in list_conversations(neo4j_graph)]}
 
 
 @app.post("/conversations", dependencies=guarded)
-async def new_conversation(body: NewConversation):
-    conversation_id = create_conversation(
-        neo4j_graph, kind=body.kind, subject=body.subject
-    )
-    return asdict(_conversation_or_404(conversation_id))
+async def new_conversation():
+    return asdict(_conversation_or_404(create_conversation(neo4j_graph)))
 
 
 @app.get("/conversations/{conversation_id}", dependencies=guarded)
@@ -290,6 +281,7 @@ async def one_conversation(conversation_id: str):
     return {
         "conversation": asdict(conversation),
         "messages": [asdict(m) for m in load_messages(neo4j_graph, conversation_id)],
+        "documents": [asdict(d) for d in documents_for(neo4j_graph, conversation_id)],
     }
 
 
@@ -303,40 +295,32 @@ async def rename(conversation_id: str, body: RenameConversation):
 @app.delete("/conversations/{conversation_id}", dependencies=guarded)
 async def remove_conversation(conversation_id: str):
     _conversation_or_404(conversation_id)
+    # Detach first: a PDF nobody else is using would otherwise be left behind
+    # with its chunks, reachable from nothing.
+    for document in documents_for(neo4j_graph, conversation_id):
+        detach_document(neo4j_graph, conversation_id, document.id)
     delete_conversation(neo4j_graph, conversation_id)
     return {"deleted": conversation_id}
 
 
-def _pdf_answer(document_id: str, text: str, callbacks):
-    """Retrieval limited to one uploaded PDF."""
-    store = Neo4jVector.from_existing_index(
-        embedding=embeddings,
-        url=settings.neo4j_uri,
-        username=settings.neo4j_username,
-        password=settings.neo4j_password,
-        index_name=PDF_INDEX_NAME,
-        node_label=PDF_CHUNK_LABEL,
-    )
-    chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=store.as_retriever(
-            search_kwargs={"filter": {DOCUMENT_ID_PROPERTY: document_id}}
-        ),
-    )
-    return chain.invoke({"query": text}, config={"callbacks": callbacks})["result"]
+def _mode_label(rag: bool, documents: list) -> str:
+    """What the transcript shows above an answer: where it could have come from."""
+    sources = ["Graph RAG"] if rag else []
+    if documents:
+        sources.append(f"{len(documents)} PDF" + ("s" if len(documents) > 1 else ""))
+    return " + ".join(sources) if sources else "LLM only"
 
 
 # EventSource only issues GET requests, so the question travels as a query
 # parameter here just as it does on /query-stream.
 @app.get("/conversations/{conversation_id}/ask", dependencies=guarded)
 def ask_in_conversation(conversation_id: str, question: Ask = Depends()):
-    conversation = _conversation_or_404(conversation_id)
+    _conversation_or_404(conversation_id)
     history = chat_history(load_messages(neo4j_graph, conversation_id))
-    # A PDF conversation is answered from its document, not the code graph.
-    # The conversation itself says which, so the client does not have to.
-    pdf = conversation.kind == KIND_PDF
-    mode = "PDF" if pdf else ("Graph RAG" if question.rag else "LLM only")
+    # Any PDFs uploaded into this chat are read alongside the code graph. The
+    # conversation is what holds them, so the client never has to say which.
+    documents = documents_for(neo4j_graph, conversation_id)
+    mode = _mode_label(question.rag, documents)
 
     # Saved before the answer, so a question that fails is not lost.
     append_message(neo4j_graph, conversation_id, "user", question.text)
@@ -345,10 +329,8 @@ def ask_in_conversation(conversation_id: str, question: Ask = Depends()):
     q = Queue()
 
     def cb():
-        if pdf:
-            return _pdf_answer(conversation.subject, question.text, [QueueCallback(q)])
         return answer_question(
-            _chain_for(question.rag),
+            _chain_for(question.rag, [d.id for d in documents]),
             question.text,
             history=history,
             callbacks=[QueueCallback(q)],
@@ -536,23 +518,26 @@ async def import_index_file(file: UploadFile = File(...)):
 
 
 # --------------------------------------------------------------------------
-# Uploaded PDFs
+# PDFs attached to a conversation
 # --------------------------------------------------------------------------
 
 
-@app.get("/pdf/documents", dependencies=guarded)
-async def pdf_documents():
-    return {"documents": [asdict(d) for d in list_documents(neo4j_graph)]}
+@app.post("/conversations/{conversation_id}/documents", dependencies=guarded)
+async def attach_pdf(conversation_id: str, file: UploadFile = File(...)):
+    """Upload a PDF into a chat, indexing it the first time it is seen.
 
-
-@app.post("/pdf/documents", dependencies=guarded)
-async def upload_pdf(file: UploadFile = File(...)):
+    The id is content-addressed, so the same file attached to a second chat
+    reuses the chunks that are already embedded instead of paying for them
+    twice - which is also why deleting it is left to the last chat holding it.
+    """
+    _conversation_or_404(conversation_id)
     content = await file.read()
     name = file.filename or "document.pdf"
     doc_id = pdf_document_id(name, content)
 
     existing = get_document(neo4j_graph, doc_id)
     if existing:
+        attach_document(neo4j_graph, conversation_id, doc_id)
         return {"document": asdict(existing), "reused": True}
 
     reader = PdfReader(BytesIO(content))
@@ -579,17 +564,20 @@ async def upload_pdf(file: UploadFile = File(...)):
     register_document(
         neo4j_graph, doc_id, name, chunks=len(chunks), pages=len(reader.pages)
     )
+    attach_document(neo4j_graph, conversation_id, doc_id)
     return {"document": asdict(get_document(neo4j_graph, doc_id)), "reused": False}
 
 
-@app.delete("/pdf/documents/{document_id}", dependencies=guarded)
-async def remove_pdf(document_id: str):
+@app.delete(
+    "/conversations/{conversation_id}/documents/{document_id}", dependencies=guarded
+)
+async def detach_pdf(conversation_id: str, document_id: str):
+    """Take a PDF out of a chat. The chat and its history stay."""
+    _conversation_or_404(conversation_id)
     if get_document(neo4j_graph, document_id) is None:
         raise HTTPException(status_code=404, detail="No such document")
-    delete_document(neo4j_graph, document_id)
-    # Its chats are about a document that no longer exists.
-    delete_conversations_for(neo4j_graph, document_id)
-    return {"deleted": document_id}
+    deleted = detach_document(neo4j_graph, conversation_id, document_id)
+    return {"detached": document_id, "deleted": deleted}
 
 
 @app.post("/generate-ticket", dependencies=guarded)

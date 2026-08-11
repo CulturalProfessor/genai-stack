@@ -7,6 +7,9 @@ class and type is a node, with edges for what calls what and which files import
 which. Answering a question searches that graph *and walks its relationships*,
 so the model sees the code you asked about **plus the code around it**.
 
+Attach a PDF to a chat and it is read alongside the code, which is what you want
+when the answer is half in a spec and half in the implementation.
+
 ---
 
 ## How it works
@@ -14,11 +17,12 @@ so the model sees the code you asked about **plus the code around it**.
 ```mermaid
 flowchart LR
     url(["repo URL"]) --> api["API :8504<br/>clone + parse + embed"]
-    api --> neo4j[("Neo4j :7474<br/>code graph")]
+    pdf(["PDF, attached to a chat"]) --> api
+    api --> neo4j[("Neo4j :7474<br/>code graph<br/>+ document chunks")]
     q(["question"]) --> chain["GraphRAG chain"]
     chain <-->|hybrid search<br/>+ graph traversal| neo4j
     chain --> llm["LLM"]
-    llm --> ans(["answer + file paths"])
+    llm --> ans(["answer + sources"])
 ```
 
 ### The graph
@@ -58,6 +62,10 @@ flowchart TD
 Full-text sits alongside vectors because code questions often name a symbol
 exactly, which lexical matching handles better than embeddings.
 
+When the chat has PDFs attached, their chunks are retrieved in the same pass and
+share that budget rather than adding to it — `k` drops from 4 symbols to 2, plus
+4 excerpts, which is about the same amount of context either way.
+
 ---
 
 ## Quick start
@@ -84,7 +92,8 @@ hostname `llm` does not resolve on any run where you forget the flag. Or set
 either, indexing still works and questions report a clear error.
 
 **3.** Open **http://localhost:5173**, paste a repository URL on *Index a
-repository*, and press the button. Then ask questions on *Ask the codebase*.
+repository*, and press the button. Then ask questions on *Ask the codebase* —
+and use the paperclip there if a PDF belongs in the conversation too.
 
 The importer is idempotent — re-indexing updates nodes in place.
 
@@ -93,25 +102,34 @@ The importer is idempotent — re-indexing updates nodes in place.
 ## Conversations
 
 Chats are saved in Neo4j, not in the browser, so they survive a refresh and a
-`docker compose down`. Both chats work the same way: **New chat** in the sidebar
-starts one, the list switches between them, and each can be renamed or deleted.
-A chat is titled after its first question.
+`docker compose down`. **New chat** in the sidebar starts one, the list switches
+between them, and each can be renamed or deleted. A chat is titled after its
+first question.
 
 ```
-(:Conversation {id, kind, title, subject})-[:HAS_MESSAGE]->(:Message {role, content, position})
+(:Conversation {id, title})-[:HAS_MESSAGE]->(:Message {role, content, position})
+(:Conversation)-[:USES_DOCUMENT]->(:PdfDocument {id, name, pages, chunks})
 ```
 
-`kind` separates the code chat from the PDF chat; `subject` scopes a PDF chat to
-one document. Messages carry an explicit `position` rather than being ordered by
-timestamp — both halves of a turn are written milliseconds apart.
+Messages carry an explicit `position` rather than being ordered by timestamp —
+both halves of a turn are written milliseconds apart.
 
 These labels sit outside the code graph on purpose: clearing the index from
 *Danger zone* deletes `File`, `Code` and `Repository` nodes and leaves your
 conversations and uploaded PDFs alone.
 
-Uploaded PDFs accumulate rather than replacing each other. Each is chunked under
-its own `document_id`, retrieval filters on it, and every document keeps its own
-set of conversations.
+### PDFs in a chat
+
+The paperclip in the composer uploads a PDF into the chat you are in, and from
+then on questions are answered from the code graph and those documents together
+— useful when the answer is half in a spec and half in the code. Several can be
+attached at once, and the retrieval budget is shared rather than added to.
+"LLM only" turns off the codebase, not the attachments.
+
+Each PDF is chunked under its own `document_id`, and retrieval filters on the
+ids attached to the conversation asking. The id is content-addressed, so the
+same file uploaded into a second chat is embedded once and shared; removing it
+from the last chat holding it deletes its chunks.
 
 ---
 
@@ -119,7 +137,7 @@ set of conversations.
 
 | URL | Service | What it is |
 |---|---|---|
-| **http://localhost:5173** | `web` | The app, in React: ask the codebase, chat with a PDF, index a repository. |
+| **http://localhost:5173** | `web` | The app, in React: ask the codebase (attaching PDFs if you like), index a repository. |
 | http://localhost:7474 | `database` | Neo4j browser — inspect the graph directly. neo4j / password. |
 | http://localhost:8504 | `api` | HTTP API over the chains, conversations, PDFs and indexing. The client uses nothing else. |
 
@@ -142,11 +160,12 @@ genai_stack/            the library — no UI, no app code
   code_index.py         reshaping the index, resolving imports to files
   schema.py             Neo4j labels, constraints, indexes
   ingest.py             writing nodes and relationships
-  retrieval.py          the graph traversal query + vector store
+  retrieval.py          the graph traversal query + the two vector stores
   llm.py                loading chat and embedding models
-  chains.py             the LLM-only and GraphRAG chains
+  chains.py             the LLM-only and GraphRAG chains, and the retriever
+                        that reads code and attached PDFs together
   conversations.py      saved chats and their messages
-  pdf_store.py          uploaded PDFs and their chunks
+  pdf_store.py          PDFs attached to a chat, and their chunks
   sources.py            validating and cloning repository URLs
 
 apps/
@@ -154,10 +173,11 @@ apps/
 
 web/                    the React client (Vite, Tailwind, shadcn primitives)
   src/lib/api.ts        the typed API client, including the SSE streams
-  src/hooks/useChat.ts  conversations, messages and streaming, shared by both chats
-  src/views/            ChatView, PdfView, IndexView
-  src/components/       NavRail, Sidebar, Transcript, Composer
-tests/                  tests over the index pipeline
+  src/hooks/useChat.ts  conversations, messages, attachments and streaming
+  src/views/            ChatView, IndexView
+  src/components/       NavRail, Sidebar, Transcript, Composer (with the
+                        paperclip that uploads a PDF into the chat)
+tests/                  the index pipeline, conversations, PDF attachment
 index/                  generated code indexes (gitignored)
 data/                   Neo4j's database volume (gitignored)
 ```
@@ -203,13 +223,13 @@ run Ollama in a container.
 | `POST /query` | `{"text": "...", "rag": true}` |
 | `POST /generate-ticket` | `{"text": "..."}` |
 | `GET /query-stream?text=…&rag=true` | SSE. Stays a GET because `EventSource` cannot POST. |
-| `GET/POST /conversations` | List, or create with `{"kind": "code"}`. |
-| `GET/PATCH/DELETE /conversations/{id}` | Load with its messages, rename, remove. |
-| `GET /conversations/{id}/ask?text=…&rag=true` | SSE. Saves both turns; a `pdf` conversation is answered from its document. |
+| `GET/POST /conversations` | List, or create one. No body. |
+| `GET/PATCH/DELETE /conversations/{id}` | Load with its messages and attached PDFs, rename, remove. |
+| `GET /conversations/{id}/ask?text=…&rag=true` | SSE. Saves both turns; any PDFs attached to the chat are searched too. |
+| `POST /conversations/{id}/documents` | Attach a PDF as multipart `file`, indexing it if it is new. |
+| `DELETE /conversations/{id}/documents/{doc}` | Detach it; its chunks go with it if no other chat has it. |
 | `GET/DELETE /graph` | Counts and indexed repositories, or clear the code graph. |
 | `GET /graph/index?url=…&branch=…` | SSE. Clone, parse and import, reporting progress. |
-| `GET/POST /pdf/documents` | List, or upload a PDF as multipart `file`. |
-| `DELETE /pdf/documents/{id}` | Remove a PDF, its chunks and its chats. |
 
 ```bash
 curl -X POST http://localhost:8504/query -H 'Content-Type: application/json' \
@@ -265,8 +285,9 @@ This is the route for a **local checkout** — indexing from the app clones over
 pip install -r requirements-dev.txt && python3 -m pytest tests/
 ```
 
-Covers symbol extraction, call and import resolution, URL validation and index
-reshaping. No database and no LLM needed.
+Covers symbol extraction, call and import resolution, URL validation, index
+reshaping, and the Cypher behind conversations and PDF attachment — the last of
+those against a fake graph, so no database and no LLM are needed.
 
 ---
 
@@ -281,8 +302,9 @@ reshaping. No database and no LLM needed.
 - **Interfaces and enums are stored as member skeletons**, without their doc
   comments. Full JSDoc bodies used to dominate semantic search over the code
   that implements the behaviour being asked about.
-- The PDF page is unrelated to the code graph; it stores chunks under its own
-  `PdfBotChunk` label.
+- **Attached PDFs are not part of the code graph** — their chunks live under
+  their own `PdfBotChunk` label and are found by plain vector search, with no
+  traversal, so a question spanning both gets the graph on one side only.
 
 ---
 

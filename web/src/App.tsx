@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { NavRail, type View } from "@/components/NavRail";
 import { ChatView } from "@/views/ChatView";
 import { IndexView } from "@/views/IndexView";
-import { PdfView } from "@/views/PdfView";
 import { getGraph } from "@/lib/api";
 
 export default function App() {
@@ -25,7 +24,6 @@ export default function App() {
     <div className="flex h-screen overflow-hidden">
       <NavRail view={view} onChange={setView} status={status} />
       {view === "chat" && <ChatView model={model} />}
-      {view === "pdf" && <PdfView />}
       {view === "index" && <IndexView />}
     </div>
   );

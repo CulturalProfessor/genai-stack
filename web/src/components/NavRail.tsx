@@ -1,12 +1,11 @@
-import { FileText, MessagesSquare, Network } from "lucide-react";
+import { MessagesSquare, Network } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-export type View = "chat" | "index" | "pdf";
+export type View = "chat" | "index";
 
 const ITEMS: { id: View; label: string; icon: typeof Network }[] = [
   { id: "chat", label: "Ask the codebase", icon: MessagesSquare },
-  { id: "pdf", label: "Chat with a PDF", icon: FileText },
   { id: "index", label: "Index a repository", icon: Network },
 ];
 

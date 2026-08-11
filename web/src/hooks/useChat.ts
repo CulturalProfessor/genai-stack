@@ -2,27 +2,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   ask,
+  attachDocument,
   createConversation,
   deleteConversation,
+  detachDocument,
   getConversation,
   listConversations,
   renameConversation,
   type Conversation,
   type Message,
+  type PdfDocument,
 } from "@/lib/api";
 
-/**
- * Everything a chat view needs, for one kind of conversation.
- *
- * The code chat and the PDF chat differ only in `kind` and whether they are
- * scoped to a subject, so they share this rather than the logic twice.
- * Passing subject === null means "not ready yet" (no PDF picked), which is
- * different from undefined ("not scoped to anything").
- */
-export function useChat(kind: string, subject?: string | null) {
+/** Everything the chat needs: its conversations, its messages, its PDFs. */
+export function useChat() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  // The PDFs uploaded into the open chat. Questions are answered from these
+  // alongside the code, so they belong to the conversation, not to the view.
+  const [documents, setDocuments] = useState<PdfDocument[]>([]);
   // Partial answers keyed by the conversation they belong to. An answer keeps
   // arriving after you start a new chat, so "is something streaming" is a
   // question about a conversation, not about the view.
@@ -33,33 +32,24 @@ export function useChat(kind: string, subject?: string | null) {
   // that started them - by the time an answer lands it may be stale.
   const openId = useRef<string | null>(null);
 
-  const scoped = subject ?? undefined;
-  const ready = subject !== null;
-
   const refresh = useCallback(async () => {
-    const list = await listConversations(kind, scoped);
+    const list = await listConversations();
     setConversations(list);
     return list;
-  }, [kind, scoped]);
+  }, []);
 
-  // Open the most recent conversation for this scope, or start one.
+  // Open the most recent conversation, or start one.
   useEffect(() => {
-    if (!ready) {
-      setConversations([]);
-      setActiveId(null);
-      setMessages([]);
-      return;
-    }
     let cancelled = false;
     (async () => {
       try {
-        const list = await listConversations(kind, scoped);
+        const list = await listConversations();
         if (cancelled) return;
         setConversations(list);
         if (list.length) {
           setActiveId(list[0].id);
         } else {
-          const created = await createConversation(kind, scoped);
+          const created = await createConversation();
           if (cancelled) return;
           setConversations([created]);
           setActiveId(created.id);
@@ -72,7 +62,7 @@ export function useChat(kind: string, subject?: string | null) {
     return () => {
       cancelled = true;
     };
-  }, [kind, scoped, ready]);
+  }, []);
 
   useEffect(() => {
     openId.current = activeId;
@@ -91,13 +81,15 @@ export function useChat(kind: string, subject?: string | null) {
   useEffect(() => {
     if (!activeId) {
       setMessages([]);
+      setDocuments([]);
       return;
     }
     let cancelled = false;
     getConversation(activeId)
-      .then(({ messages }) => {
+      .then(({ messages, documents }) => {
         if (!cancelled) {
           setMessages(messages);
+          setDocuments(documents);
           setError(null);
         }
       })
@@ -108,15 +100,36 @@ export function useChat(kind: string, subject?: string | null) {
   }, [activeId]);
 
   const newChat = async () => {
-    // Reuse an empty chat rather than piling up identical blank ones.
-    const empty = conversations.find((c) => c.message_count === 0);
+    // Reuse an empty chat rather than piling up identical blank ones. One with
+    // a PDF already uploaded into it is not empty, whatever its messages say.
+    const empty = conversations.find(
+      (c) => c.message_count === 0 && c.document_count === 0,
+    );
     if (empty) {
       setActiveId(empty.id);
       return;
     }
-    const created = await createConversation(kind, scoped);
+    const created = await createConversation();
     setConversations((current) => [created, ...current]);
     setActiveId(created.id);
+  };
+
+  // Both refresh the list: a chat's document count is what stops "New chat"
+  // from handing back a blank one that already has a PDF in it.
+  const attach = async (file: File) => {
+    if (!activeId) return;
+    const attached = await attachDocument(activeId, file);
+    setDocuments((current) =>
+      current.some((d) => d.id === attached.id) ? current : [...current, attached],
+    );
+    await refresh();
+  };
+
+  const detach = async (id: string) => {
+    if (!activeId) return;
+    await detachDocument(activeId, id);
+    setDocuments((current) => current.filter((d) => d.id !== id));
+    await refresh();
   };
 
   const send = (text: string, rag = true) => {
@@ -208,6 +221,9 @@ export function useChat(kind: string, subject?: string | null) {
     busy: !!activeId && activeId in streams,
     error,
     setError,
+    documents,
+    attach,
+    detach,
     newChat,
     send,
     stopStreaming,

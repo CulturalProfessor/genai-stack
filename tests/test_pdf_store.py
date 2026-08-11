@@ -5,10 +5,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from genai_stack.pdf_store import (
     PdfDocument,
+    adopt_legacy_conversations,
+    attach_document,
     chunk_metadata,
     delete_document,
+    detach_document,
     document_id,
-    list_documents,
+    documents_for,
     register_document,
 )
 
@@ -48,7 +51,7 @@ def test_register_document_merges_so_a_re_upload_updates():
     assert params["uploaded_at"]
 
 
-def test_list_documents_maps_rows():
+def test_documents_for_maps_rows():
     graph = FakeGraph(
         rows=[
             {
@@ -60,7 +63,7 @@ def test_list_documents_maps_rows():
             }
         ]
     )
-    assert list_documents(graph) == [
+    assert documents_for(graph, "conv-1") == [
         PdfDocument(
             id="doc-1",
             name="paper.pdf",
@@ -69,6 +72,46 @@ def test_list_documents_maps_rows():
             uploaded_at="2026-01-01T00:00:00+00:00",
         )
     ]
+
+
+def test_attach_document_merges_so_attaching_twice_is_once():
+    graph = FakeGraph()
+    attach_document(graph, "conv-1", "doc-1")
+
+    cypher, params = graph.calls[0]
+    assert "MERGE (c)-[:USES_DOCUMENT]->(d)" in cypher
+    assert params == {"conversation_id": "conv-1", "document_id": "doc-1"}
+
+
+def test_detach_document_keeps_one_another_chat_still_uses():
+    graph = FakeGraph(rows=[{"still_used": 1}])
+    deleted = detach_document(graph, "conv-1", "doc-1")
+
+    assert deleted is False
+    assert len(graph.calls) == 2  # the edge, then the count - nothing dropped
+    assert "DELETE r" in graph.calls[0][0]
+
+
+def test_detach_document_drops_one_no_chat_is_left_holding():
+    graph = FakeGraph(rows=[{"still_used": 0}])
+    deleted = detach_document(graph, "conv-1", "doc-1")
+
+    assert deleted is True
+    # The edge, the count, then delete_document's two queries.
+    assert [call[0] for call in graph.calls[2:]] == [
+        "MATCH (c:PdfBotChunk {document_id: $id}) DETACH DELETE c",
+        "MATCH (d:PdfDocument {id: $id}) DETACH DELETE d",
+    ]
+
+
+def test_adopt_legacy_conversations_turns_a_subject_into_an_edge():
+    graph = FakeGraph()
+    adopt_legacy_conversations(graph)
+
+    edge, cleanup = (call[0] for call in graph.calls)
+    assert "MATCH (d:PdfDocument {id: c.subject})" in edge
+    assert "MERGE (c)-[:USES_DOCUMENT]->(d)" in edge
+    assert "REMOVE c.subject, c.kind" in cleanup
 
 
 def test_delete_document_removes_chunks_and_the_document():

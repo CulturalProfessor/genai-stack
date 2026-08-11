@@ -116,7 +116,11 @@ def apply_schema(driver, dimension: int) -> None:
     # Imported here rather than at module scope: neither module imports from
     # this one, and keeping the direction one-way avoids a cycle.
     from genai_stack.conversations import create_constraints as conversation_constraints
+    from genai_stack.pdf_store import adopt_legacy_conversations
     from genai_stack.pdf_store import create_constraints as pdf_constraints
 
     conversation_constraints(driver)
     pdf_constraints(driver)
+    # A database written before PDFs became attachments still has the old
+    # shape; every entry point comes through here, so this is where it is fixed.
+    adopt_legacy_conversations(driver)

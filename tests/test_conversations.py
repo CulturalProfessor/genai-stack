@@ -60,12 +60,11 @@ def test_title_from_cuts_a_long_unbroken_token():
 
 def test_create_conversation_returns_an_id_and_starts_untitled():
     graph = FakeGraph()
-    conversation_id = create_conversation(graph, kind="code")
+    conversation_id = create_conversation(graph)
 
     assert conversation_id
     _, params = graph.calls[0]
     assert params["id"] == conversation_id
-    assert params["kind"] == "code"
     assert params["title"] == UNTITLED
     assert params["timestamp"]
 
@@ -104,12 +103,11 @@ def test_list_conversations_maps_rows():
         rows=[
             {
                 "id": "conv-1",
-                "kind": "code",
                 "title": "how does retrieval work",
-                "subject": None,
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "updated_at": "2026-01-02T00:00:00+00:00",
                 "message_count": 4,
+                "document_count": 1,
             }
         ]
     )
@@ -118,14 +116,22 @@ def test_list_conversations_maps_rows():
     assert conversations == [
         Conversation(
             id="conv-1",
-            kind="code",
             title="how does retrieval work",
-            subject=None,
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-02T00:00:00+00:00",
             message_count=4,
+            document_count=1,
         )
     ]
+
+
+def test_list_conversations_counts_attached_documents():
+    """The sidebar marks them, and "New chat" must not reuse one that has any."""
+    graph = FakeGraph()
+    list_conversations(graph)
+
+    cypher, _ = graph.calls[0]
+    assert "COUNT { (c)-[:USES_DOCUMENT]->() } AS document_count" in cypher
 
 
 def test_rename_conversation_falls_back_on_a_blank_title():
@@ -139,7 +145,6 @@ def test_rename_conversation_falls_back_on_a_blank_title():
 def _conversation(name, updated_at):
     return Conversation(
         id=name,
-        kind="code",
         title=name,
         created_at=updated_at,
         updated_at=updated_at,

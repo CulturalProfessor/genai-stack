@@ -13,7 +13,7 @@ const STARTERS = [
 ];
 
 export function ChatView({ model }: { model: string | null }) {
-  const chat = useChat("code");
+  const chat = useChat();
   const [mode, setMode] = useState<"Graph RAG" | "LLM only">("Graph RAG");
 
   const empty = chat.messages.length === 0 && chat.streaming === null;
@@ -40,6 +40,7 @@ export function ChatView({ model }: { model: string | null }) {
               </h1>
               <p className="mb-8 text-center text-sm text-muted-foreground">
                 Answers come from the indexed code and the call graph around it.
+                Attach a PDF and it is read alongside them.
               </p>
               <div className="grid gap-2 sm:grid-cols-2">
                 {STARTERS.map((starter) => (
@@ -71,6 +72,9 @@ export function ChatView({ model }: { model: string | null }) {
           busy={chat.busy}
           mode={mode}
           onModeChange={setMode}
+          documents={chat.documents}
+          onAttach={chat.attach}
+          onDetach={chat.detach}
         />
       </main>
     </>

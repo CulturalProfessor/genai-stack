@@ -1,5 +1,12 @@
 import { useState } from "react";
-import { MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  MessageSquare,
+  MoreHorizontal,
+  Paperclip,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,8 +27,6 @@ type Props = {
   onNew: () => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
-  /** Rendered above the chat list - the PDF view puts its documents here. */
-  children?: React.ReactNode;
   footer?: React.ReactNode;
 };
 
@@ -33,7 +38,6 @@ export function Sidebar({
   onNew,
   onRename,
   onDelete,
-  children,
   footer,
 }: Props) {
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -57,8 +61,6 @@ export function Sidebar({
           <Plus /> New chat
         </Button>
       </div>
-
-      {children}
 
       <nav className="flex-1 overflow-y-auto px-2 pb-2">
         {conversations.length === 0 && (
@@ -104,6 +106,12 @@ export function Sidebar({
                   >
                     <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />
                     <span className="truncate">{conversation.title}</span>
+                    {conversation.document_count > 0 && (
+                      <Paperclip
+                        className="size-3 shrink-0 text-muted-foreground"
+                        aria-label={`${conversation.document_count} attached`}
+                      />
+                    )}
                   </button>
 
                   <DropdownMenu>

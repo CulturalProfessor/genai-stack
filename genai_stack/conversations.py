@@ -6,14 +6,14 @@ survives `docker compose down`. The labels are deliberately outside the code
 graph's own - `reset_graph` deletes File and Code nodes, and clearing an index
 must not take a user's chat history with it.
 
-    (:Conversation {id, kind, title, created_at, updated_at, subject})
+    (:Conversation {id, title, created_at, updated_at})
     (:Message {id, role, content, mode, created_at, position})
 
     (:Conversation)-[:HAS_MESSAGE]->(:Message)
 
-`kind` separates the code chat from the PDF chat, which are different pages
-over the same store. `subject` is the PDF's document id for a pdf conversation
-and unset for a code one.
+A conversation is one kind of thing: a chat. What it can be answered from is
+not a property of it - the code graph is always there, and any PDFs uploaded
+into it hang off it as USES_DOCUMENT edges, which pdf_store owns.
 """
 from __future__ import annotations
 
@@ -24,8 +24,9 @@ from datetime import datetime, timezone
 CONVERSATION_LABEL = "Conversation"
 MESSAGE_LABEL = "Message"
 
-KIND_CODE = "code"
-KIND_PDF = "pdf"
+# The edge to an attached PDF. Named here because it is an edge out of a
+# Conversation and this module counts them; pdf_store is what follows them.
+USES_DOCUMENT = "USES_DOCUMENT"
 
 # A new chat has no title until its first question arrives. Not "New chat",
 # which is the button that makes one - the list would read as two of those.
@@ -38,12 +39,13 @@ TITLE_MAX_CHARS = 60
 @dataclass(frozen=True)
 class Conversation:
     id: str
-    kind: str
     title: str
     created_at: str
     updated_at: str
     message_count: int = 0
-    subject: str | None = None
+    # Enough for a sidebar, and for telling a blank chat from one that already
+    # has a PDF waiting in it. The documents themselves come from pdf_store.
+    document_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -87,44 +89,33 @@ def create_constraints(graph) -> None:
     )
 
 
-def create_conversation(graph, kind: str = KIND_CODE, subject: str | None = None) -> str:
+def create_conversation(graph) -> str:
     """Start an empty conversation and return its id."""
     conversation_id = str(uuid.uuid4())
     timestamp = _now()
     graph.query(
         f"""
         CREATE (c:{CONVERSATION_LABEL} {{
-            id: $id, kind: $kind, title: $title, subject: $subject,
+            id: $id, title: $title,
             created_at: $timestamp, updated_at: $timestamp
         }})
         """,
-        {
-            "id": conversation_id,
-            "kind": kind,
-            "title": UNTITLED,
-            "subject": subject,
-            "timestamp": timestamp,
-        },
+        {"id": conversation_id, "title": UNTITLED, "timestamp": timestamp},
     )
     return conversation_id
 
 
-def list_conversations(
-    graph, kind: str = KIND_CODE, subject: str | None = None
-) -> list[Conversation]:
+def list_conversations(graph) -> list[Conversation]:
     """Most recently used first - the order a sidebar wants."""
     rows = graph.query(
         f"""
-        MATCH (c:{CONVERSATION_LABEL} {{kind: $kind}})
-        WHERE $subject IS NULL OR c.subject = $subject
-        OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:{MESSAGE_LABEL})
-        WITH c, count(m) AS message_count
-        RETURN c.id AS id, c.kind AS kind, c.title AS title,
-               c.subject AS subject, c.created_at AS created_at,
-               c.updated_at AS updated_at, message_count
+        MATCH (c:{CONVERSATION_LABEL})
+        RETURN c.id AS id, c.title AS title, c.created_at AS created_at,
+               c.updated_at AS updated_at,
+               COUNT {{ (c)-[:HAS_MESSAGE]->(:{MESSAGE_LABEL}) }} AS message_count,
+               COUNT {{ (c)-[:{USES_DOCUMENT}]->() }} AS document_count
         ORDER BY c.updated_at DESC
-        """,
-        {"kind": kind, "subject": subject},
+        """
     )
     return [Conversation(**row) for row in rows]
 
@@ -133,11 +124,10 @@ def get_conversation(graph, conversation_id: str) -> Conversation | None:
     rows = graph.query(
         f"""
         MATCH (c:{CONVERSATION_LABEL} {{id: $id}})
-        OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:{MESSAGE_LABEL})
-        WITH c, count(m) AS message_count
-        RETURN c.id AS id, c.kind AS kind, c.title AS title,
-               c.subject AS subject, c.created_at AS created_at,
-               c.updated_at AS updated_at, message_count
+        RETURN c.id AS id, c.title AS title, c.created_at AS created_at,
+               c.updated_at AS updated_at,
+               COUNT {{ (c)-[:HAS_MESSAGE]->(:{MESSAGE_LABEL}) }} AS message_count,
+               COUNT {{ (c)-[:{USES_DOCUMENT}]->() }} AS document_count
         """,
         {"id": conversation_id},
     )
@@ -223,18 +213,6 @@ def delete_conversation(graph, conversation_id: str) -> None:
         DETACH DELETE c, m
         """,
         {"id": conversation_id},
-    )
-
-
-def delete_conversations_for(graph, subject: str) -> None:
-    """Drop every conversation about a subject - used when a PDF is removed."""
-    graph.query(
-        f"""
-        MATCH (c:{CONVERSATION_LABEL} {{subject: $subject}})
-        OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:{MESSAGE_LABEL})
-        DETACH DELETE c, m
-        """,
-        {"subject": subject},
     )
 
 

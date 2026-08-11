@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from langchain_neo4j import Neo4jVector
 
+from genai_stack.pdf_store import PDF_CHUNK_LABEL, PDF_INDEX_NAME
 from genai_stack.schema import (
     CODE_EMBEDDING_PROPERTY,
     CODE_LABEL,
@@ -101,4 +102,21 @@ def build_vector_store(embeddings, url: str, username: str, password: str) -> Ne
         text_node_property=CODE_TEXT_PROPERTY,
         embedding_node_property=CODE_EMBEDDING_PROPERTY,
         retrieval_query=CODE_RETRIEVAL_QUERY,
+    )
+
+
+def build_document_store(embeddings, url: str, username: str, password: str) -> Neo4jVector:
+    """Plain vector search over the chunks of uploaded PDFs.
+
+    No traversal and no keyword index: prose has no call graph to walk, and a
+    chunk is a slice of text rather than a named symbol to match exactly.
+    The caller filters this down to the documents attached to one chat.
+    """
+    return Neo4jVector.from_existing_index(
+        embedding=embeddings,
+        url=url,
+        username=username,
+        password=password,
+        index_name=PDF_INDEX_NAME,
+        node_label=PDF_CHUNK_LABEL,
     )
