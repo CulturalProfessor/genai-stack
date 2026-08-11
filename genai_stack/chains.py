@@ -191,6 +191,8 @@ def configure_qa_rag_chain(llm, embeddings, embeddings_store_url, username, pass
     graph:
       "// Calls:"          symbols this code invokes, with their locations
       "// Called by:"      symbols that invoke this code, with their locations
+      "// Types used:"     types named in this symbol's signature
+      "// Used as a type by:"  code that takes or returns this type
       "// This file imports:"  other files this one depends on
     Use those to explain how the pieces fit together and to point at where
     related logic lives, but remember you were given only their signatures -

@@ -42,18 +42,34 @@ OPTIONAL MATCH (caller:{CODE_LABEL})-[:CALLS]->(node)
 WITH node, score, f, callees,
      collect(DISTINCT caller)[..{NEIGHBOUR_LIMIT}] AS callers
 
+// Types named in this symbol's signature, and - when the hit is itself a type
+// - the code that takes or returns one. Without this a hit on an interface is
+// a dead end: it has no calls of its own to walk.
+OPTIONAL MATCH (node)-[:REFERENCES_TYPE|EXTENDS|IMPLEMENTS]->(used:{CODE_LABEL})
+WITH node, score, f, callees, callers,
+     collect(DISTINCT used)[..{NEIGHBOUR_LIMIT}] AS used_types
+OPTIONAL MATCH (user:{CODE_LABEL})-[:REFERENCES_TYPE|EXTENDS|IMPLEMENTS]->(node)
+WITH node, score, f, callees, callers, used_types,
+     collect(DISTINCT user)[..{NEIGHBOUR_LIMIT}] AS type_users
+
 // Files this file depends on.
 OPTIONAL MATCH (f)-[:IMPORTS]->(imported:{FILE_LABEL})
-WITH node, score, f, callees, callers,
+WITH node, score, f, callees, callers, used_types, type_users,
      collect(DISTINCT imported.path)[..{NEIGHBOUR_LIMIT}] AS imported_files
 
-WITH node, score, f, callees, callers, imported_files,
+WITH node, score, f, callees, callers, used_types, type_users, imported_files,
      [c IN callees |
         '  ' + c.qualified_name + '  (' + c.file_path + ':' +
         toString(c.start_line) + ')  ' + coalesce(c.signature, '')] AS callee_lines,
      [c IN callers |
         '  ' + c.qualified_name + '  (' + c.file_path + ':' +
-        toString(c.start_line) + ')  ' + coalesce(c.signature, '')] AS caller_lines
+        toString(c.start_line) + ')  ' + coalesce(c.signature, '')] AS caller_lines,
+     [c IN used_types |
+        '  ' + c.qualified_name + '  (' + c.file_path + ':' +
+        toString(c.start_line) + ')'] AS used_type_lines,
+     [c IN type_users |
+        '  ' + c.qualified_name + '  (' + c.file_path + ':' +
+        toString(c.start_line) + ')  ' + coalesce(c.signature, '')] AS type_user_lines
 
 RETURN
     node.{CODE_TEXT_PROPERTY}
@@ -62,6 +78,12 @@ RETURN
         ELSE '' END
     + CASE WHEN size(caller_lines) > 0
         THEN '\\n\\n// Called by:\\n' + apoc.text.join(caller_lines, '\\n')
+        ELSE '' END
+    + CASE WHEN size(used_type_lines) > 0
+        THEN '\\n\\n// Types used:\\n' + apoc.text.join(used_type_lines, '\\n')
+        ELSE '' END
+    + CASE WHEN size(type_user_lines) > 0
+        THEN '\\n\\n// Used as a type by:\\n' + apoc.text.join(type_user_lines, '\\n')
         ELSE '' END
     + CASE WHEN size(imported_files) > 0
         THEN '\\n\\n// This file imports: ' + apoc.text.join(imported_files, ', ')
@@ -77,6 +99,8 @@ RETURN
         language: f.language,
         calls: [c IN callees | c.qualified_name],
         called_by: [c IN callers | c.qualified_name],
+        uses_types: [c IN used_types | c.qualified_name],
+        used_as_type_by: [c IN type_users | c.qualified_name],
         imports: imported_files,
         siblings: [(f)-[:CONTAINS]->(other) WHERE other <> node | other.signature][..10]
     }} AS metadata
