@@ -89,7 +89,9 @@ export function useChat() {
       .then(({ messages, documents }) => {
         if (!cancelled) {
           setMessages(messages);
-          setDocuments(documents);
+          // Defaulted rather than trusted: the response is untyped JSON at
+          // runtime, and an API older than this client sends no documents.
+          setDocuments(documents ?? []);
           setError(null);
         }
       })
