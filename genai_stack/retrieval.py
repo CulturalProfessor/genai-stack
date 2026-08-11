@@ -1,7 +1,8 @@
 """Graph-traversal retrieval over the code knowledge graph.
 
-The vector/keyword search finds an entry point; the Cypher below walks CALLS and
-IMPORTS out from that hit to pull in code the question never matched directly.
+The vector/keyword search finds an entry point; the Cypher below walks CALLS,
+the type edges and IMPORTS out from that hit to pull in code the question never
+matched directly.
 That traversal is what makes this GraphRAG rather than vector search over a
 graph-shaped store - without it the relationships would only be storage.
 """
@@ -32,13 +33,23 @@ WITH node, score
 // The file the matched symbol lives in.
 OPTIONAL MATCH (f:{FILE_LABEL})-[:CONTAINS]->(node)
 
-// What this symbol calls.
+// What this symbol calls, least connected first. The cap used to take an
+// arbitrary five in whatever order the planner returned, so a generic helper
+// crowded out the specific collaborator that answers the question.
 OPTIONAL MATCH (node)-[:CALLS]->(callee:{CODE_LABEL})
+WITH node, score, f, callee,
+     CASE WHEN callee IS NULL THEN 0
+          ELSE count {{ (callee)<-[:CALLS]-() }} END AS callee_degree
+ORDER BY callee_degree ASC
 WITH node, score, f, collect(DISTINCT callee)[..{NEIGHBOUR_LIMIT}] AS callees
 
 // What calls this symbol - the callers are often where the behaviour a
 // question asks about actually lives.
 OPTIONAL MATCH (caller:{CODE_LABEL})-[:CALLS]->(node)
+WITH node, score, f, callees, caller,
+     CASE WHEN caller IS NULL THEN 0
+          ELSE count {{ (caller)-[:CALLS]->() }} END AS caller_degree
+ORDER BY caller_degree ASC
 WITH node, score, f, callees,
      collect(DISTINCT caller)[..{NEIGHBOUR_LIMIT}] AS callers
 
