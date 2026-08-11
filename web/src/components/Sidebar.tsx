@@ -42,6 +42,8 @@ export function Sidebar({
 }: Props) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // Asked inline, the way renaming is - the sidebar has no modals.
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   const startRename = (conversation: Conversation) => {
     setRenaming(conversation.id);
@@ -89,6 +91,37 @@ export function Sidebar({
                     className="h-8 text-sm"
                   />
                 </div>
+              ) : confirming === conversation.id ? (
+                <div key={conversation.id} className="rounded-md bg-sidebar-accent p-2">
+                  <p className="mb-2 text-xs leading-snug text-muted-foreground">
+                    Delete this chat?{" "}
+                    {conversation.document_count === 1
+                      ? "Its PDF goes too"
+                      : `Its ${conversation.document_count} PDFs go too`}
+                    , unless another chat has it.
+                  </p>
+                  <div className="flex gap-1.5">
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="h-7 flex-1"
+                      onClick={() => {
+                        setConfirming(null);
+                        onDelete(conversation.id);
+                      }}
+                    >
+                      Delete
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 flex-1"
+                      onClick={() => setConfirming(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
               ) : (
                 <div
                   key={conversation.id}
@@ -131,7 +164,13 @@ export function Sidebar({
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         destructive
-                        onSelect={() => onDelete(conversation.id)}
+                        onSelect={() =>
+                          // A chat with a PDF in it is not only a chat: the
+                          // document goes too, and re-embedding it is not free.
+                          conversation.document_count > 0
+                            ? setConfirming(conversation.id)
+                            : onDelete(conversation.id)
+                        }
                       >
                         <Trash2 className="size-3.5" /> Delete
                       </DropdownMenuItem>
