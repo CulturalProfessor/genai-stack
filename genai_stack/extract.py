@@ -78,6 +78,15 @@ MEMBER_NODES = {
 }
 FUNCTION_VALUE_NODES = {"arrow_function", "function", "function_expression"}
 CALL_NODES = {"call_expression", "new_expression"}
+# Wrappers a declaration can sit inside without its doc comment moving with it.
+# The comment is written above the outermost of these, not above the
+# declaration that `visit` eventually records.
+DOC_WRAPPER_NODES = {
+    "ambient_declaration",
+    "export_statement",
+    "lexical_declaration",
+    "variable_declaration",
+}
 # Bodies that can be reduced to a member list.
 TYPE_BODY_NODES = {"interface_body", "object_type", "enum_body"}
 
@@ -112,6 +121,9 @@ class Symbol:
     end_line: int
     signature: str
     code: str
+    # The comment written above the declaration, kept out of `code` so the
+    # returned text stays exactly what the file contains.
+    doc: str | None = None
     truncated: bool = False
     # Names invoked inside this symbol. The loader turns these into CALLS
     # relationships so retrieval can walk from a symbol to what it uses.
@@ -159,6 +171,47 @@ def node_text(node: Node, source: bytes) -> str:
 def node_name(node: Node, source: bytes) -> str | None:
     name = node.child_by_field_name("name")
     return node_text(name, source) if name is not None else None
+
+
+def doc_comment(node: Node, source: bytes, max_chars: int = 1200) -> str | None:
+    """The comment written directly above a declaration, if there is one.
+
+    This is the only natural language sitting next to a symbol, and it is
+    phrased the way a question about that symbol gets phrased - which makes it
+    worth more per character than the code it describes.
+
+    tree-sitter makes a leading comment a *sibling* of the declaration rather
+    than a child, and `visit` unwraps `export function foo()` down to the inner
+    function_declaration, so the comment is a sibling of a node one or two
+    levels up. Walk back out to the outermost wrapper before looking for it.
+    """
+    outer = node
+    while (
+        outer.parent is not None
+        and outer.parent.type in DOC_WRAPPER_NODES
+        and outer.parent.named_children
+        and outer.parent.named_children[0].id == outer.id
+    ):
+        outer = outer.parent
+
+    # Consecutive `//` lines are one comment node each, so collect backwards.
+    lines: list[str] = []
+    previous = outer.prev_named_sibling
+    while previous is not None and previous.type == "comment":
+        # A blank line in between means the comment belongs to the file, or to
+        # whatever preceded it - not to this symbol. Without this check every
+        # file-header banner gets attached to the first declaration below it.
+        if outer.start_point[0] - previous.end_point[0] > 1:
+            break
+        lines.insert(0, node_text(previous, source))
+        outer, previous = previous, previous.prev_named_sibling
+
+    if not lines:
+        return None
+    # Anything this long is a licence header or a commented-out block, not a
+    # description, and embedding it would drown the symbol it sits above.
+    text = "\n".join(lines)
+    return text if len(text) <= max_chars else None
 
 
 def signature_of(node: Node, source: bytes) -> str:
@@ -309,6 +362,7 @@ class SymbolExtractor:
                 end_line=node.end_point[0] + 1,
                 signature=signature_of(node, self.source),
                 code=code,
+                doc=doc_comment(node, self.source),
                 truncated=truncated,
                 calls=(
                     calls

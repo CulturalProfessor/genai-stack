@@ -41,9 +41,12 @@ def build_text(file_record: dict, symbol: dict) -> str:
 
     The path and qualified name are included because a bare function body is
     often ambiguous on its own - plenty of files define a `handle` or `parse`.
+    The doc comment leads because it describes the symbol in the vocabulary a
+    question about it would use, which the code itself rarely does.
     """
     header = f"File: {file_record['path']}\n{symbol['kind']} {symbol['qualified_name']}"
-    return f"{header}\n\n{symbol['code']}"
+    body = f"{symbol['doc']}\n{symbol['code']}" if symbol.get("doc") else symbol["code"]
+    return f"{header}\n\n{body}"
 
 
 def iter_rows(index: dict) -> Iterator[dict]:
@@ -59,6 +62,7 @@ def iter_rows(index: dict) -> Iterator[dict]:
                 "start_line": symbol["start_line"],
                 "end_line": symbol["end_line"],
                 "signature": symbol["signature"],
+                "doc": symbol.get("doc"),
                 "file_path": file_record["path"],
                 "file_name": file_record["name"],
                 "language": file_record["language"],

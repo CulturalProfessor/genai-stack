@@ -302,3 +302,67 @@ def test_type_skeleton_caps_very_long_member_lists():
 
 def test_types_have_no_call_edges():
     assert symbols_by_name(TYPE_SOURCE)["RetryOptions"].calls == []
+
+
+DOC_SOURCE = """
+/* eslint-disable no-console */
+
+/** Resolves the sidebar path for a doc. */
+export function resolveSidebar(a: string): Sidebar {
+    return load(a);
+}
+
+// picks the first match
+// and falls back to null
+const findFirst = (xs: string[]) => xs[0];
+
+/** Not this one. */
+
+export function detached(): void {}
+
+class Widget {
+    /** Renders the widget. */
+    render(): string { return "x"; }
+
+    other(): string { return "y"; }
+}
+"""
+
+
+def docs():
+    symbols = fs.extract_symbols(DOC_SOURCE.encode(), "typescript", "a.ts")
+    return {symbol.name: symbol.doc for symbol in symbols}
+
+
+def test_jsdoc_above_an_exported_function_is_captured():
+    """The comment is a sibling of the export_statement, not of the
+    function_declaration that gets recorded."""
+    assert docs()["resolveSidebar"] == "/** Resolves the sidebar path for a doc. */"
+
+
+def test_consecutive_line_comments_are_captured_together():
+    assert docs()["findFirst"] == "// picks the first match\n// and falls back to null"
+
+
+def test_a_comment_separated_by_a_blank_line_is_not_attached():
+    """Otherwise every file-header banner lands on the first declaration."""
+    assert docs()["detached"] is None
+
+
+def test_a_method_takes_the_comment_above_it():
+    assert docs()["render"] == "/** Renders the widget. */"
+
+
+def test_a_symbol_without_a_comment_has_no_doc():
+    assert docs()["other"] is None
+
+
+def test_the_doc_is_kept_out_of_the_code():
+    symbols = fs.extract_symbols(DOC_SOURCE.encode(), "typescript", "a.ts")
+    resolve = next(s for s in symbols if s.name == "resolveSidebar")
+    assert "Resolves the sidebar path" not in resolve.code
+
+
+def test_an_overlong_comment_is_dropped():
+    source = f"/* {'x' * 2000} */\nexport function big(): void {{}}".encode()
+    assert fs.extract_symbols(source, "typescript", "a.ts")[0].doc is None

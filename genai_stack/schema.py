@@ -3,7 +3,7 @@
     (:Repository {name, source_url, files, symbols, indexed_at})
     (:File {path, name, language, depth})
     (:Code {id, name, qualified_name, kind, parent, start_line, end_line,
-            signature, file_path, file_name, text, embedding})
+            signature, doc, file_path, file_name, text, embedding})
 
     (:File)-[:CONTAINS]->(:Code)     a file defines a symbol
     (:Code)-[:CALLS]->(:Code)        a symbol invokes another

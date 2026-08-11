@@ -33,6 +33,7 @@ MERGE (c:{CODE_LABEL} {{id: row.id}})
         c.start_line = row.start_line,
         c.end_line = row.end_line,
         c.signature = row.signature,
+        c.doc = row.doc,
         c.file_path = row.file_path,
         c.file_name = row.file_name,
         c.text = row.text
