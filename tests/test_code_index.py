@@ -6,7 +6,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from genai_stack.code_index import batched, build_text, count_symbols, iter_rows, load_index
+from genai_stack.code_index import (
+    batched,
+    build_text,
+    count_symbols,
+    iter_file_rows,
+    iter_rows,
+    load_index,
+    resolve_import,
+)
 
 INDEX = {
     "repo": "Rocket.Chat",
@@ -242,3 +250,27 @@ def test_resolve_import_prefers_a_real_js_file_over_the_ts_mapping():
     """If the .js actually exists, it wins - the mapping is only a fallback."""
     known = {"src/util.js", "src/util.ts", "src/a.ts"}
     assert resolve_import("src/a.ts", "./util.js", known) == "src/util.js"
+
+
+def test_a_declaration_file_is_resolved_when_the_import_omits_the_suffix():
+    """A package shipping its types as `foo.d.ts` is imported as `./foo`."""
+    known = {"src/common.d.ts"}
+    assert resolve_import("src/index.ts", "./common", known) == "src/common.d.ts"
+
+
+def test_an_implementation_wins_over_a_declaration():
+    known = {"src/common.d.ts", "src/common.ts"}
+    assert resolve_import("src/index.ts", "./common", known) == "src/common.ts"
+
+
+def test_files_without_symbols_still_get_a_row():
+    """Barrels and constant modules define nothing worth embedding, but they
+    are the target of imports."""
+    index = {
+        "files": [
+            {"path": "a.ts", "name": "a.ts", "language": "typescript", "depth": 0,
+             "symbols": [], "imports": []},
+        ]
+    }
+    assert [row["path"] for row in iter_file_rows(index)] == ["a.ts"]
+    assert list(iter_rows(index)) == []

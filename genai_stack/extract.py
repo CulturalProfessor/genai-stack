@@ -478,17 +478,20 @@ def build_index(
             failures += 1
             logger.warning("Skipping %s: %s", rel_path, exc)
             continue
-        if symbols:
-            records.append(
-                FileRecord(
-                    path=rel_path,
-                    name=path.name,
-                    language=language,
-                    depth=len(path.relative_to(repo).parts) - 1,
-                    symbols=symbols,
-                    imports=imports,
-                )
+        # Recorded even with no symbols. A barrel that only re-exports, or a
+        # module of plain constants, defines nothing worth embedding - but it
+        # is still the target of imports, and dropping it left every one of
+        # those pointing at a file the graph had never heard of.
+        records.append(
+            FileRecord(
+                path=rel_path,
+                name=path.name,
+                language=language,
+                depth=len(path.relative_to(repo).parts) - 1,
+                symbols=symbols,
+                imports=imports,
             )
+        )
     if failures:
         logger.warning("%d file(s) could not be parsed", failures)
     return records

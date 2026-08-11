@@ -10,7 +10,12 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, Iterator
 
 # Extensions tried when a relative import omits one, in resolution order.
-IMPORT_SUFFIXES = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
+# `.d.ts` comes last so an implementation always wins over a declaration, but it
+# has to be there: a package that ships its types as `foo.d.ts` is imported as
+# `./foo`, and without this every one of those resolves to nothing.
+IMPORT_SUFFIXES = [
+    "", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".d.ts",
+]
 
 # TypeScript's ESM resolution requires import specifiers to name the *emitted*
 # file, so `./delay.js` is how you import `delay.ts`. Without this mapping every
@@ -47,6 +52,22 @@ def build_text(file_record: dict, symbol: dict) -> str:
     header = f"File: {file_record['path']}\n{symbol['kind']} {symbol['qualified_name']}"
     body = f"{symbol['doc']}\n{symbol['code']}" if symbol.get("doc") else symbol["code"]
     return f"{header}\n\n{body}"
+
+
+def iter_file_rows(index: dict) -> Iterator[dict]:
+    """One row per file, including the ones that define no symbols.
+
+    `iter_rows` only reaches a file through its symbols, so a barrel or a
+    constants module would never become a node - and an import naming one
+    would find nothing to point at.
+    """
+    for file_record in index.get("files", []):
+        yield {
+            "path": file_record["path"],
+            "name": file_record["name"],
+            "language": file_record["language"],
+            "depth": file_record["depth"],
+        }
 
 
 def iter_rows(index: dict) -> Iterator[dict]:

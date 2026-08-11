@@ -9,6 +9,7 @@ from langchain_neo4j import Neo4jGraph
 from genai_stack.code_index import (
     batched,
     count_symbols,
+    iter_file_rows,
     iter_import_edges,
     iter_rows,
 )
@@ -18,6 +19,14 @@ from genai_stack.schema import (
     FILE_LABEL,
     REPOSITORY_LABEL,
 )
+
+FILES_QUERY = f"""
+UNWIND $rows AS row
+MERGE (f:{FILE_LABEL} {{path: row.path}})
+    SET f.name = row.name,
+        f.language = row.language,
+        f.depth = row.depth
+"""
 
 IMPORT_QUERY = f"""
 UNWIND $rows AS row
@@ -95,6 +104,12 @@ def import_index(
     total = count_symbols(index)
     imported = 0
     call_batches: list[list[dict]] = []
+
+    # Files first, so a file that defines no symbols still exists for the
+    # IMPORTS edges to land on. IMPORT_QUERY only reaches a file through one
+    # of its symbols, so on its own it would skip exactly those.
+    for rows in batched(iter_file_rows(index), batch_size):
+        graph.query(FILES_QUERY, {"rows": rows})
 
     for batch in batched(iter_rows(index), batch_size):
         # One embedding request per batch instead of one per symbol.
