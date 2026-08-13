@@ -34,8 +34,14 @@ def load_embedding_model(embedding_model_name: str, logger=BaseLogger(), config=
         dimension = 1536
         logger.info("Embedding: Using AWS")
     else:
+        # Absolute by default because that is where compose mounts the model
+        # volume. Anything running outside a container - the eval, a script -
+        # has no /embedding_model and no right to create one, so the path is
+        # overridable and `embedding_model/` in the repo is the same directory
+        # seen from the host.
         embeddings = SentenceTransformerEmbeddings(
-            model_name="all-MiniLM-L6-v2", cache_folder="/embedding_model"
+            model_name="all-MiniLM-L6-v2",
+            cache_folder=os.getenv("EMBEDDING_MODEL_DIR", "/embedding_model"),
         )
         dimension = 384
         logger.info("Embedding: Using SentenceTransformer")

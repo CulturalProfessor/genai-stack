@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -469,3 +470,27 @@ def test_types_used_only_inside_the_body_are_not_recorded():
 def test_a_method_records_its_own_signature_types():
     found = symbols_by_name(HERITAGE_SOURCE)
     assert found["Client.connect"].type_names == ["Options", "Session"]
+
+
+def test_an_index_records_the_commit_it_was_built_from(tmp_path):
+    """Gold names files and symbols at a point in history. An index that
+    cannot say which commit it came from cannot tell rotted gold from a
+    retrieval regression."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "a.ts").write_text("export function f() {}\n")
+    for command in (
+        ["git", "-C", str(tmp_path), "add", "."],
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-qm", "first"],
+    ):
+        subprocess.run(command, check=True)
+
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert fs.git_commit(tmp_path) == head
+
+
+def test_a_directory_that_is_not_a_checkout_records_no_commit(tmp_path):
+    assert fs.git_commit(tmp_path) is None

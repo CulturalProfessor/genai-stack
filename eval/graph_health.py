@@ -31,10 +31,18 @@ from pathlib import Path, PurePosixPath
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from genai_stack.code_index import (
+    REFERENCE_EDGES,
     CallResolver,
     iter_reference_edges,
     resolve_import,
 )
+
+# The relationships a symbol can be reachable through, taken from the loader's
+# own mapping rather than restated here. Neo4j mode used to ask only about
+# CALLS, which is how it kept reporting the graph as it stood before type edges
+# existed: a type node has no calls by construction, so 891 of them read as
+# unreachable while index mode put the same graph at 80% reachable.
+REFERENCE_PATTERN = "|".join(sorted(set(REFERENCE_EDGES.values())))
 
 # Kinds that carry no call edges by construction, so their reachability depends
 # entirely on the type edges that do not exist yet.
@@ -275,15 +283,29 @@ def from_neo4j(graph) -> HealthReport:
         f"""
         CALL () {{ MATCH (f:{FILE_LABEL}) RETURN count(f) AS files }}
         CALL () {{ MATCH (c:{CODE_LABEL}) RETURN count(c) AS symbols }}
-        CALL () {{ MATCH (:{CODE_LABEL})-[r:CALLS]->() RETURN count(r) AS call_edges }}
         CALL () {{ MATCH (:{FILE_LABEL})-[r:IMPORTS]->() RETURN count(r) AS import_edges }}
-        RETURN files, symbols, call_edges, import_edges
+        RETURN files, symbols, import_edges
         """
     )[0]
     report.files = counts["files"]
     report.symbols = counts["symbols"]
-    report.call_edges = counts["call_edges"]
     report.import_edges = counts["import_edges"]
+
+    report.edges_by_type = {
+        row["type"]: row["total"]
+        for row in graph.query(
+            f"""
+            MATCH (:{CODE_LABEL})-[r:{REFERENCE_PATTERN}]->(:{CODE_LABEL})
+            RETURN type(r) AS type, count(*) AS total
+            """
+        )
+    }
+    report.call_edges = report.edges_by_type.get("CALLS", 0)
+
+    # Only ask about relationships the graph actually has. Naming an absent one
+    # is not an error, but Neo4j warns about it on every query, and a repository
+    # with no class heritage would print three warnings per run.
+    present = "|".join(sorted(report.edges_by_type)) or REFERENCE_PATTERN
 
     report.kinds = {
         row["kind"]: row["total"]
@@ -296,14 +318,15 @@ def from_neo4j(graph) -> HealthReport:
     )[0]["total"]
 
     report.isolated_symbols = graph.query(
-        f"MATCH (c:{CODE_LABEL}) WHERE NOT (c)-[:CALLS]-() RETURN count(*) AS total"
+        f"MATCH (c:{CODE_LABEL}) WHERE NOT (c)-[:{present}]-() "
+        "RETURN count(*) AS total"
     )[0]["total"]
 
     types = graph.query(
         f"""
         MATCH (c:{CODE_LABEL}) WHERE c.kind IN $kinds
         RETURN count(*) AS total,
-               count(CASE WHEN (c)-[:CALLS]-() THEN 1 END) AS linked
+               count(CASE WHEN (c)-[:{present}]-() THEN 1 END) AS linked
         """,
         {"kinds": sorted(TYPE_KINDS)},
     )[0]
@@ -315,7 +338,7 @@ def from_neo4j(graph) -> HealthReport:
         for row in graph.query(
             f"""
             MATCH (c:{CODE_LABEL})
-            WITH c, count {{ (c)<-[:CALLS]-() }} AS degree
+            WITH c, count {{ (c)<-[:{present}]-() }} AS degree
             WHERE degree > 0
             RETURN degree
             """

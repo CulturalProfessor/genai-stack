@@ -207,3 +207,88 @@ def reset_graph(graph: Neo4jGraph) -> None:
         )
         if not result or not result[0]["deleted"]:
             return
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Load an index into Neo4j from the command line.
+
+    The API does this over HTTP for the web client, which means the whole
+    pipeline was only reachable through a running web stack. The eval needs a
+    graph and nothing else, so it gets a way to build one.
+
+        python -m genai_stack.ingest index/all_code_blocks.json
+    """
+    import argparse
+    import json
+    import logging
+    import sys
+    import time
+    from pathlib import Path
+
+    from genai_stack.llm import load_embedding_model
+    from genai_stack.schema import apply_schema
+    from genai_stack.settings import load_settings
+
+    parser = argparse.ArgumentParser(description="Import a code index into Neo4j")
+    parser.add_argument(
+        "index", type=Path, nargs="?", default=Path("index/all_code_blocks.json")
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="Add to the existing graph instead of replacing it",
+    )
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logger = logging.getLogger(__name__)
+    if not args.index.is_file():
+        logger.error("No such index: %s", args.index)
+        return 1
+
+    index = json.loads(args.index.read_text(encoding="utf-8"))
+    settings = load_settings()
+    graph = Neo4jGraph(
+        url=settings.neo4j_uri,
+        username=settings.neo4j_username,
+        password=settings.neo4j_password,
+    )
+    embeddings, dimension = load_embedding_model(
+        settings.embedding_model, config=settings.embedding_config
+    )
+    apply_schema(graph, dimension)
+
+    if not args.keep:
+        logger.info("Replacing the code graph (conversations and PDFs are left alone)")
+        reset_graph(graph)
+
+    started = time.perf_counter()
+    last = time.perf_counter()
+
+    def on_progress(done: int, of: int) -> None:
+        nonlocal last
+        if time.perf_counter() - last > 5 or done == of:
+            last = time.perf_counter()
+            logger.info("  %d/%d symbols", done, of)
+
+    imported = import_index(
+        index,
+        graph=graph,
+        embeddings=embeddings,
+        batch_size=settings.import_batch_size,
+        on_progress=on_progress,
+    )
+    record_import(graph, index, imported)
+    logger.info(
+        "Imported %d symbols from %s in %.0fs",
+        imported,
+        (index.get("commit") or "an unrecorded commit")[:12],
+        time.perf_counter() - started,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

@@ -200,7 +200,134 @@ chunk page numbers are monotonic.
 
 ---
 
-## Phase 2 — Retrieval eval harness
+## Phase 2 — Retrieval eval harness — **done**
+
+**Built:** `eval/dataset.py` (the question set and its rules), `eval/metrics.py`
+(scoring, no Neo4j and no model), `eval/run.py` (the CLI), `eval/mine_prs.py`
+(candidate questions from merged PRs), 34 tests under `tests/`.
+
+```
+python -m eval.run --check                      # gold still resolves?
+python -m eval.run --config baseline            # run, print, snapshot
+python -m eval.run --config no-expand           # the control arm
+python -m eval.run --diff <no-expand> <baseline>  # lift + paired McNemar
+python -m eval.run --rescore <snapshot>         # score an old run again
+```
+
+Only the two `--config` runs need the stack. A run records the flattened
+retrieval per question, so scoring, diffing and gold checking work on the
+snapshot file alone — which is what lets a scoring change be applied to old
+runs rather than invalidating them, and keeps `tests/` free of Neo4j.
+
+**Three deviations from the spec below, each deliberate:**
+
+- **A third coverage tier, `named`.** The spec has `retrieved` and `mentioned`.
+  But the IMPORTS traversal emits a bare path list, which is neither: no text and
+  no signature. Folding it into `mentioned` would let a context of file names
+  score as a win, so it is counted apart. It is also the only measurable thing
+  IMPORTS does, so the eval can now say whether that traversal earns its place.
+- **Gold may name a file with no symbol.** A mined PR knows which files it
+  changed, not which functions. Refusing file-level gold would have thrown away
+  the one source whose questions carry no lexical leakage.
+- **`abstain` is scored as a score gap, not as a refusal.** No LLM runs here, so
+  what is measurable is whether the search scores an unanswerable question lower
+  than an answerable one. If that gap is near zero, nothing downstream of
+  retrieval can tell them apart.
+
+**Dataset:** 24 questions — 18 curated from merged Docusaurus PRs, 6 hand-written
+unanswerable ones. Short of the ~50 target. `eval.mine_prs` produces the
+candidates; curation is the bottleneck and is documented in
+`eval/dataset/README.md`.
+
+### First run
+
+Corpus: facebook/docusaurus at `4546e7d2a852d4a136fc2a5a004694d33bf4d17a`,
+962 files, 3165 symbols. 24 questions: 18 answerable from merged PRs, 6 with no
+answer in the repo. `k=20`, `context_k=4`.
+
+| | no-expand | baseline |
+|---|---|---|
+| context coverage, retrieved | 38.9% | 38.9% |
+| context coverage, + mentioned | 38.9% | **50.0%** |
+| questions fully covered | 33.3% | 44.4% |
+| recall@4 | 38.9% | 38.9% |
+| recall@10 | 52.8% | 52.8% |
+| recall@20 | 58.3% | 58.3% |
+| MRR | 0.382 | 0.382 |
+| context tokens (est) | 761 | **1,384** |
+
+**Graph lift: +11.1 points**, 3 questions gaining coverage and 2 of them going
+from partly to fully covered, none losing. Exact McNemar p = 0.500, which is
+the floor two disagreements can produce - directional, not conclusive, and n=18
+was never going to be.
+
+The mechanism is the same in all three: search landed in the right file on a
+neighbouring symbol, and a CALLS edge carried the answer in. In `pr-12212` the
+seed was `formatLastmod` and the gold `getRouteLastmod` arrived as its caller;
+in `pr-12260` the seed was the `BaseUrlIssueBanner` component and the gold
+`createInlineScript` was one of its callees. That is the case for a call graph
+over chunk retrieval, made with a number for the first time.
+
+**F7. The neighbour ordering was re-sorting the whole result stream.** Found by
+the eval, immediately, in the only way it could be: the expansion arm scored
+*below* the no-expansion arm on recall@4, which is impossible when both run the
+same search. `ORDER BY callee_degree` and `ORDER BY caller_degree` are
+statement-level sorts in Cypher, not scoped to the aggregation they precede, so
+every document came back ordered by how connected its callers were and the
+relevance ranking was discarded. All 24 questions were affected. Each neighbour
+set is now gathered in its own `CALL` subquery, and `eval.run` warns when a
+run's documents are not in descending score order.
+
+In the app the damage was smaller than in the eval, because `RETRIEVER_K = 4`
+caps before the traversal runs: the right four symbols reached the prompt, in
+an arbitrary order. The eval retrieves 20 and cuts at 4, so it was scoring the
+wrong four rows.
+
+**F8. File-level gold cannot see graph lift.** The first pass used the files a
+PR changed, which is what a mined PR knows. Measured that way the lift was
+exactly **0.0 points on every question**, and the traversal looked like dead
+weight buying nothing for 82% more context. It was an artefact of the gold: if
+any symbol in the right file is a seed, the file counts as covered, and a
+neighbour pointing into that same file adds nothing measurable. Reading each
+PR's diff and tightening 17 of the 22 gold entries to the symbol that actually
+changed - the other 5 land on a const schema or inside a template string, which
+the extractor produces no symbol for - moved the lift from 0.0 to 11.1 points
+without re-running a single retrieval. The lesson is not about this graph. Gold
+shape decides what a metric is capable of showing, and a null result is a claim
+about the instrument until the instrument has been checked.
+
+**F9. Seeding, not ranking, is where the headroom is.** recall@20 sits 19
+points above recall@4, so a third of what the eval finds at all is then ranked
+out of the context. That is the reranker's case, made with a number. But note
+that recall@20 is 58.3%: two in five questions are not answered by seeding at
+any depth, and a reranker cannot help those.
+
+**F10. The score cannot support abstention, by construction.** Hybrid search
+divides each score by the best score in the same query, so the top hit is
+exactly 1.0 on all 24 questions, answerable or not. The first version of the
+abstain metric compared top scores and could only ever have reported zero. It
+now measures how far the best hit stands above the ones behind it, where
+answerable questions do separate, but weakly: 0.028 against 0.011, with ranges
+that overlap almost completely. Nothing downstream of retrieval can currently
+tell a question this repo cannot answer from one it can.
+
+**Still outstanding:**
+- The committed `index/all_code_blocks.json` is the pre-Phase-3 baseline: no
+  `packages`, no `aliases`, no docblocks. Re-index before running, or the eval
+  measures a graph nobody ships.
+- `build_payload` now records the checkout's commit, but the committed index
+  predates that, so `--check` cannot yet detect corpus drift.
+- No `explain` or `docs`-sourced questions. `explain` is the canary category and
+  is currently empty.
+- Only 18 answerable questions, against the ~50 target. Every number above is
+  directional.
+- G2 (index format version) is still not implemented, which is how the stale
+  index above went unnoticed.
+
+---
+
+### Original specification
+
 
 **Goal:** measure stages A (seeding) and B (context assembly). No LLM judge in v1 —
 every planned change lands in A or B, and the judge adds cost, noise and its own

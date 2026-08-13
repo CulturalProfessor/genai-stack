@@ -177,7 +177,14 @@ web/                    the React client (Vite, Tailwind, shadcn primitives)
   src/views/            ChatView, IndexView
   src/components/       NavRail, Sidebar, Transcript, Composer (with the
                         paperclip that uploads a PDF into the chat)
-tests/                  the index pipeline, conversations, PDF attachment
+eval/
+  graph_health.py       static metrics for the graph: resolution, orphans,
+                        degree skew. No questions, no gold, no LLM
+  run.py                the retrieval eval: ask, score, snapshot, diff
+  metrics.py            coverage tiers, recall@k, MRR, paired McNemar
+  dataset/              the question set, one JSONL per split
+tests/                  the index pipeline, conversations, PDF attachment,
+                        and the eval's scoring rules
 index/                  generated code indexes (gitignored)
 data/                   Neo4j's database volume (gitignored)
 ```
@@ -263,7 +270,15 @@ Flags: `--branch`, `--ignore-dir` / `--ignore-glob`, `--max-chars` (where long
 symbols are truncated; the 4000 default fits the retriever's `k=4` inside the
 model context), `--min-chars`. Output lands in `index/`.
 
-Import the result with **Import an index file** on *Index a repository*, or:
+Import the result with **Import an index file** on *Index a repository*, with
+the loader CLI, which needs only Neo4j and the embedding model rather than a
+running web stack:
+
+```bash
+python3 -m genai_stack.ingest index/all_code_blocks.json
+```
+
+or over HTTP:
 
 ```bash
 curl -X POST http://localhost:8504/graph/import \
@@ -288,6 +303,91 @@ pip install -r requirements-dev.txt && python3 -m pytest tests/
 Covers symbol extraction, call and import resolution, URL validation, index
 reshaping, and the Cypher behind conversations and PDF attachment — the last of
 those against a fake graph, so no database and no LLM are needed.
+
+---
+
+## Measuring
+
+Two instruments, neither of which calls an LLM. `eval/graph_health.py` asks
+whether the graph is well formed, from the extractor's JSON or from the live
+database. `eval/run.py` asks whether retrieval finds the code a question is
+about, against questions mined from merged pull requests.
+
+Graph health needs nothing installed and no database:
+
+```bash
+python3 -m eval.graph_health --index index/all_code_blocks.json
+```
+
+### Running the retrieval eval
+
+It needs the runtime stack and a loaded graph. Once, to set up an environment:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+On Debian and Ubuntu `python3 -m venv` cannot create pip until
+`sudo apt install python3-venv` has run.
+
+Then copy the two settings that only make sense outside a container into
+`.env.local`, which compose never reads:
+
+```bash
+printf 'NEO4J_URI=neo4j://localhost:7687\nNEO4J_PASSWORD=password\nEMBEDDING_MODEL_DIR=embedding_model\n' > .env.local
+```
+
+After `source .venv/bin/activate`, everything is a plain `python3` command.
+Start the database, build a graph, then run both arms and diff them:
+
+```bash
+docker compose up -d database
+```
+
+```bash
+python3 -m genai_stack.extract --github-url facebook/docusaurus
+```
+
+```bash
+python3 -m genai_stack.ingest
+```
+
+```bash
+python3 -m eval.run --config baseline
+```
+
+```bash
+python3 -m eval.run --config no-expand
+```
+
+```bash
+python3 -m eval.run --diff eval/snapshots/no-expand.json eval/snapshots/baseline.json
+```
+
+`baseline` is the shipped retriever; `no-expand` is the same search with the
+graph traversal removed. The difference between them is the graph lift, and the
+diff reports it with a paired McNemar test and the ids of the questions that
+moved. At this sample size that per-question list is the part worth reading.
+
+### Keeping it honest
+
+Gold rots whenever the corpus moves, and a question whose gold has rotted scores
+exactly like a retrieval regression. Check after every re-index:
+
+```bash
+python3 -m eval.run --check
+```
+
+A run records the retrieval it saw, so scoring is separable from asking.
+`--rescore <snapshot>` applies today's metrics to a run recorded weeks ago
+without touching the database, and `--diff` works entirely on snapshot files.
+Only the two `--config` commands need the stack at all. `--limit N` gives a
+smoke run, and writes to its own snapshot file so it cannot replace the full run
+everything else diffs against.
+
+The question set lives in `eval/dataset/`, and `eval/dataset/README.md` covers
+where the questions come from and how to add more, which is the work this needs
+most: eighteen answerable questions cannot resolve a small change.
 
 ---
 

@@ -17,3 +17,13 @@ __pycache__/
 # and editor tooling.
 node_modules/
 web/tsconfig.tsbuildinfo
+
+# Eval runs. The headline numbers get written into
+# docs/graph-rag-plan.md when a phase lands; the raw retrieval behind
+# them is large and reproducible from the dataset.
+eval/snapshots/
+
+.env.local
+
+# Host virtualenv for running the eval outside the containers.
+.venv/

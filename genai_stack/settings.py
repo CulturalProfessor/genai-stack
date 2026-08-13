@@ -35,6 +35,12 @@ def _split(value: str) -> list[str]:
 
 def load_settings() -> Settings:
     load_dotenv(".env")
+    # Compose reads `.env` too, and substitutes it into the container
+    # environment - so a value that only makes sense outside a container
+    # cannot live there. `neo4j://database:7687` is the database's name on the
+    # compose network and resolves to nothing on the host, which is exactly the
+    # kind of setting this file is for. Compose never reads it.
+    load_dotenv(".env.local", override=True)
 
     uri = os.getenv("NEO4J_URI")
     if not uri:

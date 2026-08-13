@@ -1,0 +1,6 @@
+{"id": "abstain-01", "question": "Where does the build verify Stripe webhook signatures?", "gold": [], "category": "abstain", "source": "handwritten", "note": "no payment code anywhere in the repo"}
+{"id": "abstain-02", "question": "How are database migrations applied when the server starts?", "gold": [], "category": "abstain", "source": "handwritten", "note": "a static site generator has no database"}
+{"id": "abstain-03", "question": "Which module implements the Redis cache for build artifacts?", "gold": [], "category": "abstain", "source": "handwritten", "note": "caching is on disk; there is no Redis"}
+{"id": "abstain-04", "question": "How does the GraphQL schema stitching handle conflicting types?", "gold": [], "category": "abstain", "source": "handwritten", "note": "plausible for a JS toolchain, absent here"}
+{"id": "abstain-05", "question": "Where is the rate limiter for the preview server configured?", "gold": [], "category": "abstain", "source": "handwritten", "note": "the dev server has no rate limiting"}
+{"id": "abstain-06", "question": "How does the WebAssembly plugin loader validate untrusted modules?", "gold": [], "category": "abstain", "source": "handwritten", "note": "plugins are plain JS modules, loaded by require"}

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -792,6 +793,25 @@ def build_index(
     return records
 
 
+def git_commit(repo: Path) -> str | None:
+    """The commit a checkout is on, when it is one.
+
+    The eval's gold names files and symbols at a point in history, and gold
+    that has quietly rotted scores exactly like a retrieval regression. An
+    index that cannot say which commit it was built from cannot be checked.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
 def build_payload(
     repo: Path,
     repo_name: str | None = None,
@@ -816,6 +836,7 @@ def build_payload(
     )
     payload: dict = {
         "repo": repo_name or repo.name,
+        "commit": git_commit(repo),
         "packages": find_workspace_packages(repo, skipped_dirs),
         "aliases": find_path_aliases(repo, skipped_dirs),
         "files": [asdict(record) for record in records],
